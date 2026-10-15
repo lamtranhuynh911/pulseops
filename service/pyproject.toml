@@ -1,0 +1,16 @@
+[project]
+name = "pulseops-service"
+version = "0.1.0"
+description = "Checks machine data from Kafka for integrity and production quality, stores it in MongoDB, and serves metrics to Datadog."
+requires-python = ">=3.12"
+dependencies = [
+    "aiokafka",
+    "fastapi",
+    "prometheus-client",
+    "pydantic",
+    "pymongo",
+    "uvicorn",
+]
+
+[dependency-groups]
+dev = ["pytest"]
