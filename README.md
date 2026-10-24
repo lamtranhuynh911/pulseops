@@ -105,7 +105,7 @@ Products move through the machines in the order set by `LINE_SEQUENCE` (`machine
 - Only the previous machine is checked. Every hop is checked when the product reaches the next machine, so the whole route is covered and one problem is not reported twice.
 - A `FAIL` on its own is not a violation; it means the line is doing its job. Results are counted per machine and outcome, which gives Datadog each machine's pass rate.
 - Machines publish independently, so a machine 2 result can arrive before the matching machine 1 result. A missing upstream result is stored in MongoDB as a pending check for `QA_GRACE_SECONDS` (default 60 s) before it becomes `MISSING_UPSTREAM`. If the upstream result arrives in time, the pending check is resolved as if the results had arrived in order.
-- If the integrity check has the previous machine marked `DOWN`, the violation is flagged with `upstream_machine_down: true`, so a data outage can be told apart from products actually skipping a machine.
+- If the integrity check has the previous machine marked `DOWN` at any time while the check is pending (or when a `FAILED_UPSTREAM` is detected), the violation is flagged with `upstream_machine_down: true`, so a data outage can be told apart from products actually skipping a machine.
 - Retests are allowed: the latest result at a machine counts, and the full history stays in `test_results`.
 
 ## Running several replicas
@@ -118,10 +118,12 @@ Because a replica only sees part of the data, any state that a check needs acros
 |---|---|---|
 | Machine last-seen time | `machines.last_seen_at` | Every replica updates it with `$max` on each message, so a late or redelivered message never moves it backwards. |
 | Machine status (`UP`/`DOWN`) | `machines.status` | Every replica runs the integrity timer against the shared last-seen times. A status change is written with a conditional update (only if the stored status differs), so exactly one replica records and logs each change. |
-| Pending QA checks | `pending_qa_checks` | Every replica runs a timer that claims expired pending checks with `find_one_and_delete`. Only the replica that claims a check writes its `MISSING_UPSTREAM` violation. |
+| Pending QA checks | `pending_qa_checks` | Every replica runs a timer that leases expired pending checks for 30 seconds and deletes a check only after its verdict is stored, so a replica that dies halfway loses nothing: the lease runs out and another replica judges the check. A downstream result gets at most one verdict per hop (a unique index), so judging a check twice records one violation. |
 | A product's latest result per machine | `products` | All of a product's results are on one partition (the key is `product_id`), so one replica handles them in order. |
 
 Each replica exports its own metrics, and Datadog keeps a series per pod. Counters (`tests`, `qa_violations`, `messages_rejected`) count each message once in total, so dashboards sum them across pods. `machine_up` and `machine_silence_seconds` are computed from the shared state, so every replica reports the same value; dashboards take the `max` by machine. `machine_measurement` comes from whichever replica processed a machine's latest result, so dashboards take the `avg` by machine.
+
+When a pod is replaced, its series stop, but Datadog by default keeps filling in a gauge's last value for up to 5 minutes. A deleted pod's `machine_up` of `1` would then hide a machine that goes `DOWN` right afterwards, so the dashboard and the monitors query these gauges with `.fill(null)`. The monitors grouped by pod (*Service unhealthy*, *Consumption paused*) resolve a pod's group once the pod stops reporting. *Service unhealthy* fires only after `/health` has failed for a full minute, longer than a pod takes to shut down, so neither a rolling update nor a deleted pod sets it off.
 
 ## When MongoDB is unavailable
 
@@ -232,6 +234,13 @@ Faults are injected through the simulator settings in `k8s/base/simulator.env`. 
 | A service replica crashes | `kubectl delete pod -n pulseops <one pulseops-service pod>` | The other replica takes over its partitions and Kubernetes starts a replacement. No machine is marked `DOWN` and no results are lost. |
 | MongoDB goes down | `kubectl scale -n pulseops statefulset/mongodb --replicas=0` | Service pods become not ready but are not restarted, `consumer_paused` is `1`, and consumer lag grows. Scale back to `1`: the service resumes, lag drains, and every result is stored. |
 
+With an external MongoDB there is no StatefulSet to scale. Simulate the outage by dropping the Kind node's traffic to it instead (replace `<mongodb-host>` with the IP address in `MONGODB_URI`), and delete the rule to end it:
+
+```bash
+docker exec pulseops-control-plane iptables -I FORWARD 1 -d <mongodb-host> -j DROP   # outage starts
+docker exec pulseops-control-plane iptables -D FORWARD -d <mongodb-host> -j DROP     # outage ends
+```
+
 ### Replaying mock data
 
 The fixed scenarios in [`mock-data/`](mock-data/README.md) can be published into the running stack, so the result can be compared with the expected outcome listed there (for `qa-violations`: 11 violations and product statuses 48 `PASSED`, 4 `FAILED`, 11 `NON_CONFORMING`). The simulator image has a `replay` command that publishes a scenario's results in timestamp order, 10 times faster than recorded, with their original `event_id`s and timestamps, and sends a heartbeat per machine every 5 seconds while it runs. It runs as a one-off Kubernetes Job:
@@ -283,7 +292,7 @@ helm install datadog-agent datadog/datadog -n datadog --version 3.261.0 -f datad
 # PulseOps: Kafka, MongoDB, service, simulator
 kubectl create namespace pulseops
 kubectl create secret generic pulseops-mongodb -n pulseops --from-literal uri="$MONGODB_URI"
-kubectl apply -k k8s/overlays/local
+kubectl apply -k k8s/overlays/local        # with an external MONGODB_URI: k8s/overlays/external-mongodb
 kubectl get pods -n pulseops -w            # wait until everything is Running and Ready
 
 # Datadog dashboard and monitors (uses DD_API_KEY, DD_APP_KEY, DD_SITE; safe to re-run after editing the JSON)
@@ -292,6 +301,8 @@ datadog/apply.sh
 # Reach the API from your machine
 kubectl port-forward -n pulseops svc/pulseops-service 8000:8000   # then open http://localhost:8000/docs
 ```
+
+If `MONGODB_URI` already points to an external MongoDB, apply `k8s/overlays/external-mongodb` instead of `local` (no in-cluster MongoDB is created), and set up its Datadog check as described in step 3 of [Using an external MongoDB](#using-an-external-mongodb).
 
 After changing the service code, rebuild the image, load it again with `kind load docker-image`, and run `kubectl rollout restart -n pulseops deployment/pulseops-service`. Tear everything down with `kind delete cluster --name pulseops`; this also deletes the in-cluster MongoDB and Kafka data.
 
@@ -311,11 +322,22 @@ The service reads its connection string from the `uri` key of the `pulseops-mong
    kubectl rollout restart -n pulseops deployment/pulseops-service
    ```
    `kubectl apply` only creates and updates resources, so the StatefulSet has to be deleted explicitly. Its PersistentVolumeClaim (the data) is kept until you delete it too.
-3. Point the Datadog MongoDB check at the external instance. An annotation can only describe a pod in the cluster, so for an external MongoDB the check is configured in the Agent's Helm values instead:
+3. Point the Datadog MongoDB check at the external instance. An annotation can only describe a pod in the cluster, so for an external MongoDB the check is configured in the Agent's Helm values instead. It logs in as a read-only `datadog` user; create it once with an admin login, and put its password in `.env` as `DD_MONGODB_PASSWORD`:
    ```bash
+   mongosh "mongodb://<admin-user>@<host>:<port>/admin" --eval '
+   db.getSiblingDB("admin").createUser({user: "datadog", pwd: passwordPrompt(), roles: [
+     {role: "read", db: "admin"}, {role: "clusterMonitor", db: "admin"},
+     {role: "read", db: "local"}, {role: "read", db: "pulseops"}]})'
+   ```
+   The Agent reads the host and that password from the Secret `datadog-mongodb`, the only Secret it is allowed to read, so neither is in Git:
+   ```bash
+   kubectl create secret generic datadog-mongodb -n datadog \
+     --from-literal host="$(printf '%s' "$MONGODB_URI" | sed -E 's#^mongodb(\+srv)?://([^@/]*@)?([^/?]*).*#\3#')" \
+     --from-literal password="$DD_MONGODB_PASSWORD" --dry-run=client -o yaml | kubectl apply -f -
    helm upgrade datadog-agent datadog/datadog -n datadog --version 3.261.0 \
      -f datadog/values.yaml -f datadog/values-external-mongodb.yaml --set datadog.site="$DD_SITE"
    ```
+   The Agent reads the Secret when it starts. If you change the password later, recreate the Secret and restart the Agent with `kubectl rollout restart -n datadog daemonset/datadog-agent`. To check the result, run `kubectl exec -n datadog ds/datadog-agent -c agent -- agent status` and find the `mongo` check; `Authentication failed` there means the user or its password doesn't match.
 
 Requirements for the external instance:
 
@@ -368,7 +390,7 @@ pulseops/
 
 ## Known limitations
 
-- **aiokafka can misread committed offsets right after a Kafka restart** ([aiokafka#1206](https://github.com/aio-libs/aiokafka/issues/1206), open in 0.13 and 0.14): while the broker is still loading them, they look missing, and aiokafka would reset the partition to the beginning, replaying the whole topic. The service works around it: it uses `auto_offset_reset="none"`, positions partitions itself when they are assigned, and asks for a missing offset again for about 8 seconds before starting a partition from the beginning. Remove the workaround once a fixed aiokafka is released.
+- **aiokafka can misread committed offsets right after a Kafka restart** ([aiokafka#1206](https://github.com/aio-libs/aiokafka/issues/1206), open in 0.13 and 0.14): while the broker is still loading them, they look missing, and aiokafka would reset the partition to the beginning, replaying the whole topic. The service works around it: it uses `auto_offset_reset="none"`, and when a partition has no committed offset it pauses just that partition and asks again for about 8 seconds before starting it from the beginning (an empty partition starts at once). Remove the workaround once a fixed aiokafka is released.
 
 ## Beyond the PoC
 
