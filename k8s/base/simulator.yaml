@@ -1,0 +1,33 @@
+# Simulated machines 1-3. Fault injection settings come from simulator.env, which Kustomize turns
+# into the simulator-config ConfigMap (see configMapGenerator in kustomization.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simulator
+spec:
+  replicas: 1
+  # Stop the old pod before starting the new one: a rolling update would briefly run two
+  # simulators, i.e. two copies of every machine.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: simulator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: simulator
+    spec:
+      containers:
+        - name: simulator
+          image: pulseops-simulator:dev
+          imagePullPolicy: IfNotPresent   # the image only exists on the Kind node (kind load)
+          args: ["live"]
+          envFrom:
+            - configMapRef:
+                name: simulator-config     # Kustomize rewrites this to simulator-config-<hash>
+          env:
+            - { name: KAFKA_BOOTSTRAP_SERVERS, value: "kafka-0.kafka.pulseops.svc.cluster.local:9092" }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }

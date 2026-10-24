@@ -1,0 +1,88 @@
+# The PulseOps service: 2 replicas in the Kafka consumer group pulseops-service. Kafka splits each
+# topic's 3 partitions between them; a 4th replica would get none and stay idle.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pulseops-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pulseops-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pulseops-service
+      annotations:
+        # Datadog autodiscovery: the node Agent runs these checks against each pod's own IP (%%host%%),
+        # so every replica is scraped and probed separately. The key must name the container.
+        # OpenMetrics: list names without the pulseops_ prefix and without _total; Datadog then shows
+        # e.g. pulseops.tests.count. Never add a product ID label (one custom metric per product).
+        ad.datadoghq.com/pulseops-service.checks: |
+          {
+            "openmetrics": {
+              "init_config": {},
+              "instances": [{
+                "openmetrics_endpoint": "http://%%host%%:8000/metrics",
+                "namespace": "pulseops",
+                "raw_metric_prefix": "pulseops_",
+                "metrics": ["tests", "qa_violations", "messages_rejected", "machine_up", "machine_silence_seconds",
+                            "machine_measurement", "consumer_paused", "event_latency_seconds"]
+              }]
+            },
+            "http_check": {
+              "init_config": {},
+              "instances": [{
+                "name": "pulseops-health-%%kube_pod_name%%",
+                "url": "http://%%host%%:8000/health",
+                "timeout": 5
+              }]
+            }
+          }
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: pulseops-service
+          image: pulseops-service:dev
+          imagePullPolicy: IfNotPresent   # the image only exists on the Kind node (kind load)
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: MONGODB_URI             # from the Secret created with kubectl (README)
+              valueFrom:
+                secretKeyRef:
+                  name: pulseops-mongodb
+                  key: uri
+            - { name: MONGODB_DATABASE, value: "pulseops" }
+            - { name: KAFKA_BOOTSTRAP_SERVERS, value: "kafka-0.kafka.pulseops.svc.cluster.local:9092" }
+            - { name: LINE_SEQUENCE, value: "machine-1,machine-2,machine-3" }
+            - { name: INTEGRITY_TIMEOUT_SECONDS, value: "15" }
+            - { name: QA_GRACE_SECONDS, value: "60" }
+          # Readiness: can this pod do its job right now? /health is 503 while Kafka or MongoDB is
+          # unavailable, so Kubernetes stops routing to the pod but leaves it running.
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            failureThreshold: 2
+          # Liveness: is the process stuck? Only checks that the port answers, so a MongoDB outage
+          # never restarts the pod.
+          livenessProbe:
+            tcpSocket: { port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pulseops-service
+spec:
+  selector:
+    app.kubernetes.io/name: pulseops-service
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
