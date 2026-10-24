@@ -1,7 +1,7 @@
 {
   "name": "[PulseOps] Consumption paused: {{pod_name.name}}",
   "type": "query alert",
-  "query": "max(last_2m):max:pulseops.consumer_paused{*} by {pod_name} > 0",
+  "query": "max(last_2m):max:pulseops.consumer_paused{*} by {pod_name}.fill(null) > 0",
   "message": "{{#is_alert}}{{pod_name.name}} has paused consumption: MongoDB is unavailable. Kafka keeps the messages; the service resumes on its own when MongoDB answers.{{/is_alert}}\n{{#is_recovery}}{{pod_name.name}} is consuming again.{{/is_recovery}}",
   "tags": [
     "app:pulseops",
@@ -12,6 +12,7 @@
       "critical": 0
     },
     "require_full_window": false,
-    "include_tags": true
+    "include_tags": true,
+    "on_missing_data": "resolve"
   }
 }

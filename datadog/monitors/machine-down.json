@@ -1,7 +1,7 @@
 {
   "name": "[PulseOps] Machine down: {{machine.name}}",
   "type": "query alert",
-  "query": "max(last_1m):max:pulseops.machine_up{*} by {machine} < 1",
+  "query": "max(last_1m):max:pulseops.machine_up{*} by {machine}.fill(null) < 1",
   "message": "{{#is_alert}}{{machine.name}} has sent no data for over a minute (the service marks a machine DOWN after 15 s of silence). Check the machine and its connection to Kafka.{{/is_alert}}\n{{#is_recovery}}{{machine.name}} is sending data again.{{/is_recovery}}",
   "tags": [
     "app:pulseops",
