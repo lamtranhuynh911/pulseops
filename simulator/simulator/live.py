@@ -21,9 +21,11 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Faults:
-    fail_rate: float = 0.0           # chance that a machine's test fails
-    skip_rate: float = 0.0           # chance that a product bypasses machine 1 or 2
-    leak_rate: float = 0.0           # chance that a failed product keeps moving down the line
+    """Per-machine probabilities (see "Demo scenarios" in the README)."""
+
+    fail_rate: float = 0.0           # the test fails and the product (correctly) leaves the line
+    skip_rate: float = 0.0           # the product bypasses machine 1 or 2 (MISSING_UPSTREAM next)
+    leak_rate: float = 0.0           # the product fails at machine 1 or 2 but keeps moving (FAILED_UPSTREAM next)
     offline: frozenset[str] = frozenset()  # machines that publish nothing at all
 
 
@@ -35,14 +37,18 @@ def plan_journey(faults: Faults, rng: random.Random) -> tuple[str | None, ...]:
         if left_line:
             journey.append(None)
             continue
-        # Bypassing the last machine can't be detected (no later machine checks it), so only 1 and 2.
-        if stage < len(MACHINES) - 1 and rng.random() < faults.skip_rate:
-            journey.append(None)
-            continue
+        # Skipping or leaking past the last machine can't be detected (no later machine checks it),
+        # so these faults only apply to machines 1 and 2.
+        if stage < len(MACHINES) - 1:
+            if rng.random() < faults.skip_rate:
+                journey.append(None)
+                continue
+            if rng.random() < faults.leak_rate:
+                journey.append("FAIL")
+                continue
         result = "FAIL" if rng.random() < faults.fail_rate else "PASS"
         journey.append(result)
-        if result == "FAIL" and rng.random() >= faults.leak_rate:
-            left_line = True
+        left_line = result == "FAIL"
     return tuple(journey)
 
 
@@ -54,9 +60,7 @@ class LiveLine:
         self.heartbeat_interval_s = heartbeat_interval_s
         self.faults = faults
         self.rng = rng or random.Random()
-        # Seeded from the Unix time. While products start at most once a second, a restarted simulator
-        # starts above every ID it used before, far from the mock-data ranges (P-000001 to P-000163).
-        self.next_product = int(time.time())
+        self.last_product = 0
         self.published = 0
 
     async def run(self) -> None:
@@ -74,10 +78,15 @@ class LiveLine:
 
     async def _products(self, tasks: asyncio.TaskGroup) -> None:
         while True:
-            product_id = f"P-{self.next_product}"
-            self.next_product += 1
+            product_id = self._new_product_id()
             tasks.create_task(self._move(product_id, plan_journey(self.faults, self.rng)))
             await asyncio.sleep(self.product_interval_s)
+
+    def _new_product_id(self) -> str:
+        """A millisecond timestamp, strictly increasing: unique across restarts at any product rate,
+        and far from the mock-data ranges (P-000001 to P-000163)."""
+        self.last_product = max(self.last_product + 1, time.time_ns() // 1_000_000)
+        return f"P-{self.last_product}"
 
     async def _move(self, product_id: str, journey: tuple[str | None, ...]) -> None:
         entered = asyncio.get_running_loop().time()

@@ -25,6 +25,9 @@ async def start_producer(bootstrap_servers: str) -> AIOKafkaProducer:
             await producer.start()
             log.info("connected to Kafka at %s", bootstrap_servers)
             return producer
+        except asyncio.CancelledError:
+            await producer.stop()
+            raise
         except KafkaError as e:
             await producer.stop()
             log.warning("Kafka not reachable (%s), retrying in %.0f s", e, backoff)

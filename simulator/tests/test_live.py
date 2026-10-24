@@ -18,7 +18,16 @@ def test_failed_product_leaves_the_line():
 
 
 def test_leaked_product_keeps_moving_after_a_fail():
-    assert journey(fail_rate=1.0, leak_rate=1.0) == ("FAIL", "FAIL", "FAIL")
+    assert journey(leak_rate=1.0) == ("FAIL", "FAIL", "PASS")
+
+
+def test_leak_rate_is_a_per_machine_probability():
+    # SIM_LEAK_RATE=0.05 (README demo) must give about 5 % of products a FAILED_UPSTREAM per hop,
+    # not 5 % of the few that already failed.
+    rng = random.Random(3)
+    journeys = [plan_journey(Faults(fail_rate=0.03, leak_rate=0.05), rng) for _ in range(20000)]
+    leaked_at_machine_1 = sum(j[0] == "FAIL" and j[1] is not None for j in journeys) / len(journeys)
+    assert 0.04 < leaked_at_machine_1 < 0.06
 
 
 def test_skip_bypasses_machines_1_and_2_only():
