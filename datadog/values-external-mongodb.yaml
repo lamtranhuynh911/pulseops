@@ -1,0 +1,30 @@
+# Extra Helm values for an external MongoDB: the Datadog mongo check. It can't be an autodiscovery
+# annotation, because the external MongoDB has no pod. Use it together with values.yaml:
+#   helm upgrade datadog-agent datadog/datadog -n datadog --version 3.261.0 \
+#     -f datadog/values.yaml -f datadog/values-external-mongodb.yaml --set datadog.site="$DD_SITE"
+#
+# The host and the password of the read-only "datadog" MongoDB user come from the Secret
+# datadog-mongodb (created with kubectl from .env, see "Using an external MongoDB" in the README),
+# so neither is in Git or in this file.
+datadog:
+  secretBackend:
+    # Resolves ENC[k8s_secret@<namespace>/<secret>/<key>] handles in check configurations.
+    command: /readsecret_multiple_providers.sh
+    # Allow reading only this one Secret. The chart's default would let the Agent read every Secret
+    # in the cluster, including the service's MongoDB credentials.
+    enableGlobalPermissions: false
+    roles:
+      - namespace: datadog
+        secrets:
+          - datadog-mongodb
+  confd:
+    mongo.yaml: |-
+      init_config:
+      instances:
+        - hosts:
+            - ENC[k8s_secret@datadog/datadog-mongodb/host]
+          username: datadog
+          password: ENC[k8s_secret@datadog/datadog-mongodb/password]
+          database: admin
+          dbnames:
+            - pulseops

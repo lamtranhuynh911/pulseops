@@ -1,0 +1,40 @@
+# Helm values for the Datadog Agent on the Kind cluster (chart datadog/datadog, version 3.261.0).
+# Install: see "Bring the stack up" in the README. The site comes from .env:
+#   helm install datadog-agent datadog/datadog -n datadog --version 3.261.0 \
+#     -f datadog/values.yaml --set datadog.site="$DD_SITE"
+#
+# The checks themselves (OpenMetrics, HTTP, mongo, kafka_consumer) are not configured here: they are
+# autodiscovery annotations on the pods they monitor, so the Agent follows the pods wherever they run.
+datadog:
+  # Secret with the key api-key, created with kubectl from .env (never in Git).
+  apiKeyExistingSecret: datadog-secret
+  # Kind's cluster name can't be detected automatically; without it the Agent may fail to start.
+  clusterName: pulseops
+  # Tag check metrics with pod_name. Each service replica exports its own series (the README's
+  # "Running several replicas"); at the Agent's default ("low") both replicas' series would collide.
+  checksCardinality: orchestrator
+  kubelet:
+    # Kind's kubelet serves a self-signed certificate.
+    tlsVerify: false
+  # Recent charts also install the Datadog Operator by default (for an optional later migration to
+  # it). The Agent here is managed by this chart, so the Operator would only cost memory.
+  operator:
+    enabled: false
+  # Cluster metrics (pods, restarts, deployments) from kube-state-metrics, run by the Cluster Agent.
+  kubeStateMetricsCore:
+    enabled: true
+    # Don't watch Secrets: nothing here uses kubernetes_state.secret.*, and it would give the Cluster
+    # Agent cluster-wide read access to every Secret.
+    collectSecretMetrics: false
+  # Not needed for the PoC; off to save memory on a laptop.
+  logs:
+    enabled: false
+  apm:
+    socketEnabled: false
+    portEnabled: false
+  processAgent:
+    processCollection: false
+    processDiscovery: false
+
+clusterAgent:
+  enabled: true
