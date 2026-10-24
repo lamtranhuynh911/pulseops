@@ -6,13 +6,15 @@ write is idempotent, so a redelivered message changes nothing.
 Each assigned partition has its own worker that processes its records in order and commits after
 each one; one fetch loop hands the records to the workers. Order only matters within a partition
 (all of a product's results are on one), so partitions never wait for each other: heartbeats are
-processed promptly even when test-result writes are slow, for example with a distant MongoDB.
+processed promptly even when test-result writes are slow, for example with a distant MongoDB. The
+workers of newly assigned partitions are started in the rebalance listener, before any of their
+records can be fetched, so no record is ever fetched without a worker to take it.
 
 A MongoDB outage pauses the consumer instead of crashing it: the worker whose write failed holds
 that message, all assigned partitions are paused, and nothing past the held message is committed.
 The fetch loop keeps calling getmany(), so the group doesn't kick this replica out
-(max_poll_interval_ms), and pings MongoDB with backoff. Once MongoDB answers, every worker retries
-its held message and the partitions resume.
+(max_poll_interval_ms), and pings MongoDB with a short backoff. Once MongoDB answers, every worker
+retries its held message and the partitions resume.
 """
 
 import asyncio
@@ -24,21 +26,29 @@ from datetime import datetime, timedelta, timezone
 
 from aiokafka import AIOKafkaConsumer, ConsumerRebalanceListener, TopicPartition
 from aiokafka.errors import CommitFailedError, KafkaError, NoOffsetForPartitionError, OffsetOutOfRangeError
-from pymongo.errors import ConnectionFailure, PyMongoError
+from pymongo.errors import PyMongoError
 
 from . import metrics
 from .checks.quality import QualityCheck
+from .concurrency import gather_all
 from .config import Settings
 from .models import Heartbeat, Rejected, TestResult, parse
 from .storage import Storage
 
 log = logging.getLogger(__name__)
+# Kafka reconnects: backoff between attempts.
 MAX_BACKOFF_S = 30.0
+# MongoDB pings while paused: kept short, so that after an outage all replicas resume within a few
+# seconds of each other (a failed ping itself takes up to 5 s), well inside the
+# INTEGRITY_TIMEOUT_SECONDS that the check timers wait.
+MAX_PING_BACKOFF_S = 2.0
 # A partition whose worker has this many records waiting is paused in Kafka until half have been
-# processed, so a slow MongoDB doesn't make records pile up in memory.
+# processed, so a slow MongoDB doesn't make records pile up in memory. A fetch adds at most
+# MAX_PARTITION_FETCH_BYTES (about 200 messages) per partition on top.
 MAX_QUEUED = 500
+MAX_PARTITION_FETCH_BYTES = 64 * 1024
 # How often to ask for a partition's committed offset before concluding it has none (see
-# Consumer.position_partitions).
+# Consumer._position).
 OFFSET_LOOKUP_ATTEMPTS = 5
 OFFSET_LOOKUP_DELAY_S = 2.0
 # How often to check that the broker answers, and how long to wait for it.
@@ -77,19 +87,20 @@ class Consumer:
             group_id=settings.kafka_group_id,
             client_id=socket.gethostname(),   # the pod name, shown by kafka-consumer-groups.sh
             enable_auto_commit=False,
-            # Never reset a partition silently: the consumer positions partitions itself
-            # (position_partitions), and this makes aiokafka raise instead of resetting.
+            # Never reset a partition silently: when aiokafka finds no committed offset, it raises,
+            # and _position decides (see there for why).
             auto_offset_reset="none",
+            max_partition_fetch_bytes=MAX_PARTITION_FETCH_BYTES,
         )
         self.kafka.subscribe(list(self.models), listener=_Rebalance(self))
         self.workers: dict[TopicPartition, PartitionWorker] = {}
         self.resumed = asyncio.Event()      # set while consuming, cleared while paused
         self.throttled: set[TopicPartition] = set()
+        self.positioning: dict[TopicPartition, asyncio.Task] = {}
         self._next_ping = 0.0
         self._ping_backoff = 1.0
 
     async def run(self) -> None:
-        metrics.CONSUMER_PAUSED.set(1)  # paused until MongoDB has answered once
         await self._start_kafka()
         probe = asyncio.create_task(self._probe_kafka(), name="kafka probe")
         try:
@@ -98,19 +109,19 @@ class Consumer:
                 try:
                     batch = await self.kafka.getmany(timeout_ms=500)
                 except NoOffsetForPartitionError as e:
-                    # Safety net, in case a partition was left without a position.
-                    await self.position_partitions([tp for tp in e.args if isinstance(tp, TopicPartition)])
+                    for tp in e.args:
+                        if isinstance(tp, TopicPartition):
+                            self._position_later(tp)
                     continue
                 except OffsetOutOfRangeError as e:
-                    # The committed offset is older than the topic's retention: the data before it is gone.
-                    partitions = list(e.args[0]) if e.args and isinstance(e.args[0], dict) else []
-                    log.warning("committed offset no longer in the topic for %s: starting from the oldest record",
-                                _names(partitions))
-                    await self.kafka.seek_to_beginning(*partitions)
+                    await self._restart_expired(e)
                     continue
-                for tp, records in batch.items():
-                    if worker := self.workers.get(tp):
-                        worker.add(records)
+                except KafkaError as e:
+                    # aiokafka hands coordination errors to getmany(); it expects to be called again.
+                    log.warning("Kafka error while fetching (%r); retrying", e)
+                    await asyncio.sleep(1)
+                    continue
+                self._dispatch(batch)
                 self._throttle()
                 if self.state.paused:
                     await self._resume_if_mongodb_answers()
@@ -120,6 +131,15 @@ class Consumer:
             self.state.kafka_running = False
             self.state.kafka_ok = False
             await self.kafka.stop()  # leaves the group, so the other replicas take over at once
+
+    def _dispatch(self, batch: dict[TopicPartition, list]) -> None:
+        for tp, records in batch.items():
+            if worker := self.workers.get(tp):
+                worker.add(records)
+            elif tp in self.kafka.assignment():
+                # Should not happen (workers start before fetching), but never drop records.
+                log.warning("no worker for %s: fetching its records again", _names([tp]))
+                self.kafka.seek(tp, records[0].offset)
 
     async def _start_kafka(self) -> None:
         backoff = 1.0
@@ -155,35 +175,58 @@ class Consumer:
             self.state.kafka_ok = answered
             await asyncio.sleep(KAFKA_PROBE_INTERVAL_S)
 
-    async def position_partitions(self, partitions) -> None:
-        """Start each partition at its committed offset, or at the beginning if the group has none.
+    # --- positioning partitions -----------------------------------------------------------------
+
+    def _position_later(self, tp: TopicPartition) -> None:
+        """Position a partition aiokafka found no committed offset for, without holding up the others."""
+        if tp in self.positioning or tp not in self.kafka.assignment():
+            return
+        self.kafka.pause(tp)
+        self.positioning[tp] = asyncio.create_task(self._position(tp), name=f"position {_names([tp])}")
+
+    async def _position(self, tp: TopicPartition) -> None:
+        """Start a partition at its committed offset, or at the beginning if the group has none.
 
         aiokafka 0.13 and 0.14 read committed offsets as missing while a restarted broker is still
         loading them (aiokafka#1206); with auto_offset_reset="earliest" that would replay the whole
         topic, which takes hours against a distant MongoDB. So a missing offset is asked for again a
         few times before the partition is started from the beginning, which is only right for a
-        partition this group has never committed.
+        partition this group has never committed. An empty partition has nothing to replay and starts
+        at once.
         """
-        missing = set(partitions)
-        if missing:
-            # An empty partition has nothing to replay: start it right away instead of waiting.
-            first, end = await asyncio.gather(self.kafka.beginning_offsets(missing), self.kafka.end_offsets(missing))
-            empty = {tp for tp in missing if first.get(tp) == end.get(tp)}
-            if empty:
-                await self.kafka.seek_to_beginning(*empty)
-                missing -= empty
-        for attempt in range(OFFSET_LOOKUP_ATTEMPTS):
-            for tp in sorted(missing):
-                offset = await self.kafka.committed(tp)
-                if offset is not None:
-                    self.kafka.seek(tp, offset)
-                    missing.discard(tp)
-            if not missing:
-                return
-            if attempt < OFFSET_LOOKUP_ATTEMPTS - 1:
-                await asyncio.sleep(OFFSET_LOOKUP_DELAY_S)
-        log.info("no committed offset for %s: starting from the beginning", _names(missing))
-        await self.kafka.seek_to_beginning(*missing)
+        try:
+            first, end = await asyncio.gather(self.kafka.beginning_offsets([tp]), self.kafka.end_offsets([tp]))
+            offset = None
+            if first.get(tp) != end.get(tp):
+                for attempt in range(OFFSET_LOOKUP_ATTEMPTS):
+                    offset = await self.kafka.committed(tp)
+                    if offset is not None or attempt == OFFSET_LOOKUP_ATTEMPTS - 1:
+                        break
+                    await asyncio.sleep(OFFSET_LOOKUP_DELAY_S)
+            if tp not in self.kafka.assignment():
+                return  # revoked meanwhile: its new owner positions it
+            if offset is None:
+                log.info("no committed offset for %s: starting from the beginning", _names([tp]))
+                await self.kafka.seek_to_beginning(tp)
+            else:
+                self.kafka.seek(tp, offset)
+        except KafkaError as e:
+            log.warning("could not position %s (%r); retrying when it is reported again", _names([tp]), e)
+        finally:
+            self.positioning.pop(tp, None)
+            if tp in self.kafka.assignment() and not self.state.paused and tp not in self.throttled:
+                self.kafka.resume(tp)
+
+    async def _restart_expired(self, error: OffsetOutOfRangeError) -> None:
+        """The committed offset is older than the topic's retention: the data before it is gone."""
+        out_of_range = error.args[0] if error.args and isinstance(error.args[0], dict) else {}
+        partitions = [tp for tp in out_of_range if tp in self.kafka.assignment()]
+        log.warning("committed offset no longer in the topic for %s: starting from the oldest record",
+                    _names(partitions))
+        try:
+            await self.kafka.seek_to_beginning(*partitions)
+        except KafkaError as e:
+            log.warning("could not move %s to the oldest record (%r)", _names(partitions), e)
 
     # --- partition workers ----------------------------------------------------------------------
 
@@ -195,10 +238,11 @@ class Consumer:
     async def stop_workers(self, partitions) -> None:
         """Stop the workers before their partitions go to another replica, so they commit nothing more.
         A message interrupted halfway is processed again by the new owner, which is harmless."""
-        workers = [self.workers.pop(tp) for tp in partitions if tp in self.workers]
-        for worker in workers:
-            worker.task.cancel()
-        await asyncio.gather(*(worker.task for worker in workers), return_exceptions=True)
+        tasks = [self.workers.pop(tp).task for tp in partitions if tp in self.workers]
+        tasks += [self.positioning.pop(tp) for tp in partitions if tp in self.positioning]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         self.throttled.difference_update(partitions)
 
     def _throttle(self) -> None:
@@ -209,7 +253,7 @@ class Consumer:
                 self.kafka.pause(tp)
             elif tp in self.throttled and len(worker.queue) <= MAX_QUEUED // 2:
                 self.throttled.discard(tp)
-                if not self.state.paused:
+                if not self.state.paused and tp not in self.positioning:
                     self.kafka.resume(tp)
 
     # --- processing one message -----------------------------------------------------------------
@@ -232,22 +276,27 @@ class Consumer:
         touch = self.storage.touch_machine(message.machine_id, now)  # any message is a sign of life
         if isinstance(message, Heartbeat):
             await touch
-        else:
-            # Independent writes run concurrently, to save round trips. Even for a duplicate the QA
-            # check runs again: a crash between the insert and the check must not lose the check, and
-            # every step in it is idempotent.
-            _, first_time, _ = await asyncio.gather(
-                touch, self.storage.insert_test_result(message, now), self.quality.on_result(message, now)
-            )
-            if not first_time:
-                return  # counted the first time; counters must count each message once
+            _observe_latency(message)
+            return
+        # Independent writes run concurrently, to save round trips; gather_all lets all of them finish
+        # before a failure is raised. Even for a duplicate the QA check runs again: a crash between the
+        # insert and the check must not lose the check, and every step in it is idempotent.
+        _, first_time, _ = await gather_all(touch, self._store_result(message, now), self.quality.on_result(message, now))
+        if first_time:
+            _observe_latency(message)
+
+    async def _store_result(self, message: TestResult, now: datetime) -> bool:
+        first_time = await self.storage.insert_test_result(message, now)
+        if first_time:
+            # Counted right after the first insert, whatever happens to the other steps: a retry finds
+            # the result stored and must not count it again.
             metrics.TESTS.labels(message.machine_id, message.result).inc()
             for name, value in message.measurements.items():
                 metrics.MACHINE_MEASUREMENT.labels(message.machine_id, name).set(value)
-        metrics.EVENT_LATENCY.observe(max(0.0, (now - message.timestamp).total_seconds()))
+        return first_time
 
     async def _reject(self, record, rejected: Rejected, now: datetime) -> None:
-        if await self.storage.insert_rejected(record.topic, record.partition, record.offset,
+        if await self.storage.insert_rejected(record.topic, record.partition, record.offset, record.timestamp,
                                               rejected.reason, rejected.detail, record.value, now):
             metrics.MESSAGES_REJECTED.labels(record.topic, rejected.reason).inc()
             log.warning("rejected %s[%d]@%d: %s", record.topic, record.partition, record.offset, rejected)
@@ -270,7 +319,12 @@ class Consumer:
         self.resumed.clear()
         metrics.CONSUMER_PAUSED.set(1)
         self.kafka.pause(*self.kafka.assignment())
-        self._next_ping = 0.0
+        # Don't reset the backoff here: if writes keep failing while pings succeed, each pause waits
+        # longer before the next attempt instead of flapping every second.
+        self._next_ping = asyncio.get_running_loop().time() + self._ping_backoff
+        self._ping_backoff = min(self._ping_backoff * 2, MAX_PING_BACKOFF_S)
+
+    def write_succeeded(self) -> None:
         self._ping_backoff = 1.0
 
     async def _resume_if_mongodb_answers(self) -> None:
@@ -283,17 +337,17 @@ class Consumer:
             if not self.state.prepared:
                 await self.storage.prepare(utcnow())
                 self.state.prepared = True
-        except ConnectionFailure as e:
+        except PyMongoError as e:  # also e.g. ConfigurationError when a mongodb+srv:// lookup fails
             log.warning("MongoDB unavailable (%s), next check in %.0f s", e, self._ping_backoff)
             self.state.mongodb_ok = False
+            metrics.CONSUMER_PAUSED.set(1)
             self._next_ping = loop.time() + self._ping_backoff
-            self._ping_backoff = min(self._ping_backoff * 2, MAX_BACKOFF_S)
+            self._ping_backoff = min(self._ping_backoff * 2, MAX_PING_BACKOFF_S)
             return
         self.state.mongodb_ok = True
         self.state.paused = False
         metrics.CONSUMER_PAUSED.set(0)
-        self.kafka.resume(*(self.kafka.assignment() - self.throttled))
-        self._ping_backoff = 1.0
+        self.kafka.resume(*(self.kafka.assignment() - self.throttled - set(self.positioning)))
         # The backlog hasn't been processed yet: give machines a full timeout before judging them.
         self.state.judge_after = utcnow() + timedelta(seconds=self.settings.integrity_timeout_s)
         self.resumed.set()
@@ -308,7 +362,7 @@ class PartitionWorker:
         self.tp = tp
         self.queue: deque = deque()
         self._wake = asyncio.Event()
-        self.task = asyncio.create_task(self._run(), name=f"worker {tp.topic}[{tp.partition}]")
+        self.task = asyncio.create_task(self._run(), name=f"worker {_names([tp])}")
 
     def add(self, records: list) -> None:
         self.queue.extend(records)
@@ -328,12 +382,17 @@ class PartitionWorker:
                 # Hold the message: it stays first in the queue and is retried after the resume.
                 self.consumer.pause(f"MongoDB operation failed: {e}")
                 continue
+            self.consumer.write_succeeded()
             self.queue.popleft()
             await self.consumer.commit(self.tp, record.offset + 1)
 
 
 class _Rebalance(ConsumerRebalanceListener):
-    """Starts and stops partition workers, and keeps new partitions paused while MongoDB is down."""
+    """Starts and stops partition workers, and keeps new partitions paused while MongoDB is down.
+
+    Nothing here waits on the network: aiokafka doesn't send group heartbeats while the listener
+    runs, so a slow listener would get this replica expelled from the group.
+    """
 
     def __init__(self, consumer: Consumer):
         self.consumer = consumer
@@ -345,12 +404,12 @@ class _Rebalance(ConsumerRebalanceListener):
         # Partitions assigned in a rebalance start unpaused: pause them again while MongoDB is down.
         if self.consumer.state.paused and assigned:
             self.consumer.kafka.pause(*assigned)
-        try:
-            await self.consumer.position_partitions(assigned)
-        finally:
-            # Even if positioning failed (the fetch loop's safety net retries it), every assigned
-            # partition needs a worker, or its records would be fetched and never processed.
-            self.consumer.start_workers(assigned)
+        self.consumer.start_workers(assigned)
+
+
+def _observe_latency(message: TestResult | Heartbeat) -> None:
+    """Time from the machine's timestamp until the message has been processed."""
+    metrics.EVENT_LATENCY.observe(max(0.0, (utcnow() - message.timestamp).total_seconds()))
 
 
 def _names(partitions) -> str:

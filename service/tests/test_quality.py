@@ -128,3 +128,77 @@ def test_retest_at_previous_machine_wins():
 
     asyncio.run(scenario())
     assert store.violations == {}
+
+
+def test_upstream_down_at_arrival_stays_flagged_after_the_machine_is_back():
+    # SIM_OFFLINE_MACHINES demo: machine-1's data is lost; it comes back before the grace period ends.
+    store = MemoryStore()
+    store.machine_statuses["machine-1"] = "DOWN"
+    check = QualityCheck(store, LINE, GRACE_S)
+
+    async def scenario() -> None:
+        await check.on_result(result("machine-2", "P-1", "PASS", T0, "00000000-0000-4000-8000-000000000002"), T0)
+        store.machine_statuses["machine-1"] = "UP"
+        await check.expire_pending(T0 + timedelta(seconds=GRACE_S))
+
+    asyncio.run(scenario())
+    (violation,) = store.violations.values()
+    assert (violation.type, violation.upstream_machine_down) == (MISSING_UPSTREAM, True)
+
+
+def test_a_verdict_lost_with_its_replica_is_judged_again_after_the_lease():
+    import pytest
+    from pymongo.errors import AutoReconnect
+
+    from pulseops.storage import PENDING_LEASE
+
+    store = MemoryStore()
+    check = QualityCheck(store, LINE, GRACE_S)
+    due = T0 + timedelta(seconds=GRACE_S)
+
+    async def scenario() -> None:
+        await check.on_result(result("machine-2", "P-1", "PASS", T0, "00000000-0000-4000-8000-000000000002"), T0)
+        store.fail_next_insert_violation = True   # e.g. the replica loses MongoDB, or dies, mid-verdict
+        with pytest.raises(AutoReconnect):
+            await check.expire_pending(due)
+        assert store.violations == {} and len(store.pending) == 1   # not lost: still pending, leased
+        assert await check.expire_pending(due + timedelta(seconds=1)) == 0   # the lease protects it
+        assert await check.expire_pending(due + PENDING_LEASE) == 1           # then another replica takes it
+
+    asyncio.run(scenario())
+    assert [v.type for v in store.violations.values()] == [MISSING_UPSTREAM]
+    assert store.pending == {}
+
+
+def test_one_verdict_per_hop_even_if_the_upstream_state_changes_before_a_redelivery():
+    store = MemoryStore()
+    check = QualityCheck(store, LINE, GRACE_S)
+    machine_2 = result("machine-2", "P-1", "PASS", T0, "00000000-0000-4000-8000-000000000002")
+
+    async def scenario() -> None:
+        await check.on_result(machine_2, T0)
+        await check.expire_pending(T0 + timedelta(seconds=GRACE_S))              # MISSING_UPSTREAM
+        late = T0 + timedelta(seconds=GRACE_S + 5)                               # after the grace period
+        await check.on_result(result("machine-1", "P-1", "FAIL", T0 - timedelta(seconds=15),
+                                     "00000000-0000-4000-8000-000000000001"), late)
+        await check.on_result(machine_2, late)                                   # redelivered: would be FAILED_UPSTREAM
+
+    asyncio.run(scenario())
+    assert [v.type for v in store.violations.values()] == [MISSING_UPSTREAM]
+
+
+def test_outage_entirely_inside_the_grace_period_is_flagged():
+    # UP when the result arrives, DOWN for a while, UP again before the grace period ends.
+    store = MemoryStore()
+    store.machine_statuses["machine-1"] = "UP"
+    check = QualityCheck(store, LINE, GRACE_S)
+
+    async def scenario() -> None:
+        await check.on_result(result("machine-2", "P-1", "PASS", T0, "00000000-0000-4000-8000-000000000002"), T0)
+        store.machine_statuses["machine-1"] = "UP"                      # back, after being DOWN
+        store.machine_changed_at["machine-1"] = T0 + timedelta(seconds=40)
+        await check.expire_pending(T0 + timedelta(seconds=GRACE_S))
+
+    asyncio.run(scenario())
+    (violation,) = store.violations.values()
+    assert violation.upstream_machine_down is True

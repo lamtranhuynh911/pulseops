@@ -1,17 +1,21 @@
-"""Tests for the consumer's commit, hold and pause behaviour, with a fake Kafka client."""
+"""Tests for the consumer's commit, hold, pause and positioning behaviour, with a fake Kafka client."""
 
 import asyncio
 from collections import namedtuple
+from datetime import datetime, timezone
 
 import pytest
 from aiokafka import TopicPartition
-from pymongo.errors import ServerSelectionTimeoutError
+from pymongo.errors import OperationFailure, ServerSelectionTimeoutError
 
 from pulseops import consumer as consumer_module
+from pulseops import metrics
+from pulseops.concurrency import gather_all
 from pulseops.config import Settings
 from pulseops.consumer import Consumer, ServiceState, _Rebalance
+from pulseops.models import TestResult
 
-Record = namedtuple("Record", "topic partition offset value")
+Record = namedtuple("Record", "topic partition offset value timestamp")
 A = TopicPartition("machine.test-results", 0)
 B = TopicPartition("machine.heartbeats", 1)
 
@@ -23,13 +27,14 @@ def no_offset_lookup_delay(monkeypatch):
 
 class FakeKafka:
     def __init__(self):
+        self.assigned = {A, B}
         self.paused, self.commits = set(), []
         self.committed_answers = {}  # committed offsets the broker reports, call by call (None = none)
+        self.log_offsets = {}        # tp -> (first offset, end offset); a missing tp is (0, 10), not empty
         self.seeks, self.from_beginning = [], []
-        self.log_offsets = {}  # tp -> (first offset, end offset); a missing tp is (0, 10), i.e. not empty
 
     def assignment(self):
-        return frozenset({A, B})
+        return frozenset(self.assigned)
 
     def pause(self, *tps):
         self.paused.update(tps)
@@ -79,13 +84,18 @@ async def make_consumer(storage=None):
 
 
 def records(tp, offsets):
-    return [Record(tp.topic, tp.partition, offset, b"") for offset in offsets]
+    return [Record(tp.topic, tp.partition, offset, b"", 0) for offset in offsets]
 
 
 async def until(condition, timeout_s=2.0):
     async with asyncio.timeout(timeout_s):
         while not condition():
             await asyncio.sleep(0.005)
+
+
+async def resume_now(consumer):
+    consumer._next_ping = 0.0  # skip the backoff wait
+    await consumer._resume_if_mongodb_answers()
 
 
 def test_each_partition_is_processed_in_order_and_committed_per_message():
@@ -98,8 +108,7 @@ def test_each_partition_is_processed_in_order_and_committed_per_message():
 
         consumer.handle = handle
         consumer.start_workers({A, B})
-        consumer.workers[A].add(records(A, [10, 11]))
-        consumer.workers[B].add(records(B, [5]))
+        consumer._dispatch({A: records(A, [10, 11]), B: records(B, [5])})
         await until(lambda: len(consumer.kafka.commits) == 3)
         await consumer.stop_workers([A, B])
         return handled, consumer.kafka.commits
@@ -120,14 +129,22 @@ def test_slow_partition_does_not_hold_up_another():
 
         consumer.handle = handle
         consumer.start_workers({A, B})
-        consumer.workers[A].add(records(A, [10]))
-        consumer.workers[B].add(records(B, [5, 6]))
+        consumer._dispatch({A: records(A, [10]), B: records(B, [5, 6])})
         await until(lambda: (B, 7) in consumer.kafka.commits)  # heartbeats got through
         slow.set()
         await until(lambda: (A, 11) in consumer.kafka.commits)
         await consumer.stop_workers([A, B])
 
     asyncio.run(scenario())
+
+
+def test_records_without_a_worker_are_fetched_again_not_dropped():
+    async def scenario():
+        consumer = await make_consumer()
+        consumer._dispatch({A: records(A, [7, 8])})
+        return consumer.kafka
+
+    assert asyncio.run(scenario()).seeks == [(A, 7)]
 
 
 def test_mongodb_failure_holds_the_message_pauses_and_retries_after_resume():
@@ -144,7 +161,7 @@ def test_mongodb_failure_holds_the_message_pauses_and_retries_after_resume():
         consumer.handle = handle
         storage.up = False
         consumer.start_workers({A})
-        consumer.workers[A].add(records(A, [10, 11, 12]))
+        consumer._dispatch({A: records(A, [10, 11, 12])})
         await until(lambda: consumer.state.paused)
         assert consumer.kafka.paused == {A, B}
         assert consumer.kafka.commits == [(A, 11)]   # never past the held message
@@ -152,7 +169,7 @@ def test_mongodb_failure_holds_the_message_pauses_and_retries_after_resume():
         assert attempts == [10, 11]                    # held, not retried while paused
 
         storage.up = True
-        await consumer._resume_if_mongodb_answers()
+        await resume_now(consumer)
         await until(lambda: len(consumer.kafka.commits) == 3)
         await consumer.stop_workers([A])
         return consumer, attempts
@@ -163,12 +180,70 @@ def test_mongodb_failure_holds_the_message_pauses_and_retries_after_resume():
     assert not consumer.state.paused and consumer.kafka.paused == set()
 
 
+def test_mongodb_operation_failure_is_held_not_rejected(monkeypatch):
+    monkeypatch.setattr(consumer_module, "parse", lambda model, raw, line: object())
+
+    async def scenario():
+        consumer = await make_consumer()
+        failures = iter([OperationFailure("Transaction numbers are only allowed on a replica set member")])
+
+        async def apply(message, now):
+            if error := next(failures, None):
+                raise error
+
+        async def reject(record, rejected, now):
+            raise AssertionError(f"rejected: {rejected}")
+
+        consumer._apply, consumer._reject = apply, reject
+        consumer.start_workers({A})
+        consumer._dispatch({A: records(A, [10])})
+        await until(lambda: consumer.state.paused)
+        assert consumer.kafka.commits == []   # held, not skipped
+        await resume_now(consumer)
+        await until(lambda: consumer.kafka.commits == [(A, 11)])
+        await consumer.stop_workers([A])
+
+    asyncio.run(scenario())
+
+
+def test_ping_backoff_is_capped_and_only_reset_by_a_successful_write():
+    async def scenario():
+        consumer = await make_consumer()
+        backoffs = []
+        for _ in range(3):
+            consumer.pause("write failed")   # e.g. writes fail while pings succeed
+            backoffs.append(consumer._ping_backoff)
+        consumer.write_succeeded()
+        return backoffs, consumer._ping_backoff
+
+    backoffs, after_success = asyncio.run(scenario())
+    assert backoffs == [2.0, 2.0, 2.0]   # replicas resume within seconds of each other after an outage
+    assert after_success == 1.0
+
+
+def test_consumer_paused_metric_is_only_1_during_an_outage():
+    async def scenario():
+        storage = FakeStorage()
+        consumer = await make_consumer(storage)
+        consumer.state.paused = True               # a replica that is starting
+        metrics.CONSUMER_PAUSED.set(0)
+        await resume_now(consumer)
+        after_start = metrics.CONSUMER_PAUSED._value.get()
+        storage.up = False
+        consumer.pause("write failed")
+        during_outage = metrics.CONSUMER_PAUSED._value.get()
+        return after_start, during_outage
+
+    assert asyncio.run(scenario()) == (0, 1)
+
+
 def test_rebalance_starts_and_stops_workers_and_repauses_while_paused():
     async def scenario():
         consumer = await make_consumer()
         consumer.state.paused = True
         listener = _Rebalance(consumer)
-        await listener.on_partitions_assigned({A})
+        async with asyncio.timeout(0.1):  # must not wait on the network (no group heartbeats meanwhile)
+            await listener.on_partitions_assigned({A})
         assert consumer.kafka.paused == {A} and set(consumer.workers) == {A}
         await listener.on_partitions_revoked({A})
         assert consumer.workers == {}
@@ -188,7 +263,7 @@ def test_partition_far_behind_is_throttled_until_it_catches_up(monkeypatch):
 
         consumer.handle = handle
         consumer.start_workers({A})
-        consumer.workers[A].add(records(A, range(5)))
+        consumer._dispatch({A: records(A, range(5))})
         consumer._throttle()
         assert A in consumer.kafka.paused
         gate.set()
@@ -200,65 +275,30 @@ def test_partition_far_behind_is_throttled_until_it_catches_up(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_mongodb_operation_failure_is_held_not_rejected(monkeypatch):
-    from pymongo.errors import OperationFailure
-
-    monkeypatch.setattr(consumer_module, "parse", lambda model, raw, line: object())
-
-    async def scenario():
-        consumer = await make_consumer()
-        failures = iter([OperationFailure("Transaction numbers are only allowed on a replica set member")])
-
-        async def apply(message, now):
-            if error := next(failures, None):
-                raise error
-
-        async def reject(record, rejected, now):
-            raise AssertionError(f"rejected: {rejected}")
-
-        consumer._apply, consumer._reject = apply, reject
-        consumer.start_workers({A})
-        consumer.workers[A].add(records(A, [10]))
-        await until(lambda: consumer.state.paused)
-        assert consumer.kafka.commits == []   # held, not skipped
-        await consumer._resume_if_mongodb_answers()
-        await until(lambda: consumer.kafka.commits == [(A, 11)])
-        await consumer.stop_workers([A])
-
-    asyncio.run(scenario())
-
-
 def test_offset_missing_while_the_broker_loads_is_asked_for_again():
     # aiokafka#1206: right after a broker restart, committed offsets can look missing for a moment.
-
     async def scenario():
         consumer = await make_consumer()
-        kafka = consumer.kafka
-        kafka.committed_answers = {A: [None, None, 42]}
-        await consumer.position_partitions({A, B})
-        return kafka
+        consumer.kafka.committed_answers = {A: [None, None, 42]}
+        consumer._position_later(A)
+        assert A in consumer.kafka.paused         # only this partition waits
+        await consumer.positioning[A]
+        return consumer.kafka
 
     kafka = asyncio.run(scenario())
-    assert kafka.seeks == [(A, 42)]          # resumed where the group left off, not replayed
-    assert kafka.from_beginning == [B]       # never committed: starts from the beginning
+    assert kafka.seeks == [(A, 42)]               # resumed where the group left off, not replayed
+    assert kafka.from_beginning == [] and A not in kafka.paused
 
 
-def test_workers_start_even_if_positioning_fails():
+def test_never_committed_partition_starts_from_the_beginning():
     async def scenario():
         consumer = await make_consumer()
+        consumer._position_later(A)
+        await consumer.positioning[A]
+        return consumer.kafka
 
-        async def failing(partitions):
-            raise RuntimeError("coordinator unavailable")
-
-        consumer.position_partitions = failing
-        try:
-            await _Rebalance(consumer).on_partitions_assigned({A})
-        except RuntimeError:
-            pass
-        assert set(consumer.workers) == {A}
-        await consumer.stop_workers([A])
-
-    asyncio.run(scenario())
+    kafka = asyncio.run(scenario())
+    assert kafka.from_beginning == [A] and kafka.seeks == []
 
 
 def test_empty_partition_starts_at_once_without_waiting(monkeypatch):
@@ -267,12 +307,26 @@ def test_empty_partition_starts_at_once_without_waiting(monkeypatch):
     async def scenario():
         consumer = await make_consumer()
         consumer.kafka.log_offsets = {B: (0, 0)}
+        consumer._position_later(B)
         async with asyncio.timeout(1):
-            await consumer.position_partitions({B})
+            await consumer.positioning[B]
         return consumer.kafka
 
     kafka = asyncio.run(scenario())
     assert kafka.from_beginning == [B] and kafka.seeks == []
+
+
+def test_partition_revoked_while_positioning_is_left_alone():
+    async def scenario():
+        consumer = await make_consumer()
+        consumer.kafka.committed_answers = {A: [None, 42]}
+        consumer._position_later(A)
+        consumer.kafka.assigned.discard(A)        # revoked while the lookups run
+        await consumer.positioning[A]
+        return consumer.kafka
+
+    kafka = asyncio.run(scenario())
+    assert kafka.seeks == [] and kafka.from_beginning == []
 
 
 def test_kafka_outage_pauses_the_checks_and_delays_them_after_recovery(monkeypatch):
@@ -300,7 +354,62 @@ def test_kafka_outage_pauses_the_checks_and_delays_them_after_recovery(monkeypat
         broker_up[0] = True
         await until(lambda: state.kafka_ok)
         assert not state.can_judge(consumer_module.utcnow())  # waits a full integrity timeout first
-        assert state.judge_after >= now + consumer_module.timedelta(seconds=14)
+        assert (state.judge_after - now).total_seconds() >= 14
         probe.cancel()
+
+    asyncio.run(scenario())
+
+
+def test_a_test_result_is_counted_once_even_if_a_later_step_fails():
+    message = TestResult(schema_version=1, event_id="00000000-0000-4000-8000-000000000001", machine_id="machine-3",
+                         product_id="P-1", result="PASS", timestamp=datetime(2026, 10, 15, tzinfo=timezone.utc))
+
+    class Storage:
+        def __init__(self):
+            self.stored = False
+
+        async def touch_machine(self, machine_id, now):
+            pass
+
+        async def insert_test_result(self, result, now):
+            first, self.stored = not self.stored, True
+            return first
+
+    class Quality:
+        def __init__(self):
+            self.calls = 0
+
+        async def on_result(self, result, now):
+            self.calls += 1
+            if self.calls == 1:
+                raise ServerSelectionTimeoutError("MongoDB lost during the QA check")
+
+    async def scenario():
+        consumer = await make_consumer(Storage())
+        consumer.quality = Quality()
+        counter = metrics.TESTS.labels("machine-3", "PASS")
+        before = counter._value.get()
+        with pytest.raises(ServerSelectionTimeoutError):
+            await consumer._apply(message, consumer_module.utcnow())
+        await consumer._apply(message, consumer_module.utcnow())   # the retry after the resume
+        return counter._value.get() - before
+
+    assert asyncio.run(scenario()) == 1
+
+
+def test_gather_all_lets_every_write_finish_before_raising():
+    finished = []
+
+    async def fails():
+        raise ServerSelectionTimeoutError("lost")
+
+    async def slow_write():
+        await asyncio.sleep(0.02)
+        finished.append("write")
+
+    async def scenario():
+        with pytest.raises(ServerSelectionTimeoutError):
+            await gather_all(fails(), slow_write())
+        assert finished == ["write"]   # nothing from this attempt is still running
 
     asyncio.run(scenario())

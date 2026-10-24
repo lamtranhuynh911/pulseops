@@ -8,7 +8,7 @@ records and logs it.
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
 
 log = logging.getLogger(__name__)
@@ -43,8 +43,9 @@ class MachineStore(Protocol):
     async def machine_times(self) -> tuple[dict[str, datetime | None], dict[str, datetime]]:
         """(last_seen_at by machine, tracked_since by machine) for every machine in LINE_SEQUENCE."""
 
-    async def set_machine_status(self, machine_id: str, status: str, now: datetime) -> bool:
-        """Store the status only if it differs; True if this call changed it."""
+    async def set_machine_status(self, machine_id: str, status: str, now: datetime, cutoff: datetime) -> bool:
+        """Store the status only if it differs and the stored times (last seen before or after cutoff)
+        still support it; True if this call changed it."""
 
 
 class IntegrityCheck:
@@ -55,8 +56,9 @@ class IntegrityCheck:
     async def run_once(self, now: datetime) -> list[MachineState]:
         last_seen, tracked_since = await self.store.machine_times()
         states = evaluate(last_seen, tracked_since, now, self.timeout_s)
+        cutoff = now - timedelta(seconds=self.timeout_s)
         for state in states:
-            if await self.store.set_machine_status(state.machine_id, state.status, now):
+            if await self.store.set_machine_status(state.machine_id, state.status, now, cutoff):
                 if state.status == DOWN:
                     log.warning("%s is DOWN: no data for %.0f s", state.machine_id, state.silence_s)
                 else:
