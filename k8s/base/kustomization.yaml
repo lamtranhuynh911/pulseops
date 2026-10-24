@@ -1,0 +1,26 @@
+# Everything except MongoDB. The overlays in k8s/overlays/ add (or leave out) the in-cluster MongoDB.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: pulseops
+resources:
+  - namespace.yaml
+  - kafka.yaml
+  - kafka-topics-job.yaml
+  - service.yaml
+  - simulator.yaml
+# simulator.env becomes the ConfigMap simulator-config-<hash>. The hash changes with the content, so
+# every edit gives the Deployment a new ConfigMap name and Kubernetes rolls out a new simulator pod.
+configMapGenerator:
+  - name: simulator-config
+    envs:
+      - simulator.env
+# Added to every resource. includeSelectors: false keeps it out of Deployment selectors, which are
+# immutable (commonLabels would put it there).
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: pulseops
+    includeSelectors: false
+# One place to pin image tags for every container that uses them.
+images:
+  - name: apache/kafka
+    newTag: 4.3.2

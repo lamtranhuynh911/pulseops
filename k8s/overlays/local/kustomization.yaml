@@ -1,0 +1,12 @@
+# Default overlay: the base plus an in-cluster MongoDB.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: pulseops
+resources:
+  - ../../base
+  - mongodb.yaml
+images:
+  # MongoDB 8.0+ refuses to start on Linux kernel 6.19+ (SERVER-121912, a TCMalloc/rseq issue), and
+  # Kind pods run on the host kernel. 7.0 uses the older allocator and isn't affected.
+  - name: mongo
+    newTag: 7.0.45

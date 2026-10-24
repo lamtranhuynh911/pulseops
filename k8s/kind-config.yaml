@@ -1,0 +1,9 @@
+# Kind cluster for PulseOps: one node that runs both the control plane and all workloads.
+# Create it with: kind create cluster --config k8s/kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: pulseops
+nodes:
+  - role: control-plane
+    # Pinned to the image built for kind v0.33.0; kind requires the digest.
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5

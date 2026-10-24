@@ -1,0 +1,66 @@
+# In-cluster MongoDB for the local overlay. No auth: it's only reachable inside the cluster.
+# The service doesn't know about this file; it reads its connection string from the
+# pulseops-mongodb Secret (mongodb://mongodb:27017 for this instance).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+spec:
+  clusterIP: None   # headless: "mongodb" resolves to the pod IP
+  selector:
+    app.kubernetes.io/name: mongodb
+  ports:
+    - name: mongodb
+      port: 27017
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongodb
+spec:
+  serviceName: mongodb
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mongodb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mongodb
+      annotations:
+        # Datadog MongoDB check (no auth: the in-cluster MongoDB has none). For an external MongoDB
+        # the check is configured in datadog/values-external-mongodb.yaml instead.
+        ad.datadoghq.com/mongodb.checks: |
+          {"mongo": {"init_config": {}, "instances": [{"hosts": ["%%host%%:27017"]}]}}
+    spec:
+      containers:
+        - name: mongodb
+          image: mongo
+          # Cap the WiredTiger cache: by default it takes about half of the machine's RAM.
+          args: ["--wiredTigerCacheSizeGB", "0.25"]
+          ports:
+            - name: mongodb
+              containerPort: 27017
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+          readinessProbe:
+            exec:
+              command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: mongodb }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 512Mi }
+            limits: { memory: 1Gi }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi

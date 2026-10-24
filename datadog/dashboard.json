@@ -1,0 +1,527 @@
+{
+  "title": "PulseOps",
+  "description": "Production line (machine status, throughput, pass rate, QA violations) next to the health of the service, the Kafka consumer and MongoDB. Managed by datadog/apply.sh: edit datadog/dashboard.json, not the UI.",
+  "layout_type": "ordered",
+  "widgets": [
+    {
+      "definition": {
+        "type": "group",
+        "title": "Production line",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "type": "query_table",
+              "title": "Machine status (machine_up: 1 = UP, 0 = DOWN)",
+              "requests": [
+                {
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "up",
+                      "query": "max:pulseops.machine_up{*} by {machine}",
+                      "aggregator": "last"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "silence",
+                      "query": "max:pulseops.machine_silence_seconds{*} by {machine}",
+                      "aggregator": "last"
+                    }
+                  ],
+                  "response_format": "scalar",
+                  "formulas": [
+                    {
+                      "formula": "up",
+                      "alias": "machine_up",
+                      "conditional_formats": [
+                        {
+                          "comparator": "<",
+                          "value": 1,
+                          "palette": "white_on_red"
+                        },
+                        {
+                          "comparator": ">=",
+                          "value": 1,
+                          "palette": "white_on_green"
+                        }
+                      ]
+                    },
+                    {
+                      "formula": "silence",
+                      "alias": "silent for (s)"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Seconds since each machine's last message",
+              "show_legend": true,
+              "requests": [
+                {
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "s",
+                      "query": "max:pulseops.machine_silence_seconds{*} by {machine}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "s"
+                    }
+                  ],
+                  "response_format": "timeseries",
+                  "display_type": "line"
+                }
+              ],
+              "markers": [
+                {
+                  "value": "y = 15",
+                  "display_type": "error dashed",
+                  "label": "integrity timeout"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Throughput (tests per minute)",
+              "show_legend": true,
+              "requests": [
+                {
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "t",
+                      "query": "sum:pulseops.tests.count{*} by {machine}.as_count().rollup(sum, 60)"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "t"
+                    }
+                  ],
+                  "response_format": "timeseries",
+                  "display_type": "bars"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Pass rate by machine (%)",
+              "show_legend": true,
+              "requests": [
+                {
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "pass",
+                      "query": "sum:pulseops.tests.count{result:pass} by {machine}.as_count().rollup(sum, 300)"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "total",
+                      "query": "sum:pulseops.tests.count{*} by {machine}.as_count().rollup(sum, 300)"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "100 * pass / total",
+                      "alias": "pass rate"
+                    }
+                  ],
+                  "response_format": "timeseries",
+                  "display_type": "line"
+                }
+              ],
+              "markers": [
+                {
+                  "value": "y = 90",
+                  "display_type": "error dashed",
+                  "label": "pass-rate drop"
+                }
+              ],
+              "yaxis": {
+                "min": "0",
+                "max": "100"
+              }
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "QA violations",
+              "show_legend": true,
+              "requests": [
+                {
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "v",
+                      "query": "sum:pulseops.qa_violations.count{*} by {type,machine}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "v"
+                    }
+                  ],
+                  "response_format": "timeseries",
+                  "display_type": "bars"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Temperature (°C)",
+              "show_legend": true,
+              "requests": [
+                {
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "t",
+                      "query": "avg:pulseops.machine_measurement{name:temperature_c} by {machine}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "t"
+                    }
+                  ],
+                  "response_format": "timeseries",
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Cycle time (s)",
+              "show_legend": true,
+              "requests": [
+                {
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "c",
+                      "query": "avg:pulseops.machine_measurement{name:cycle_time_s} by {machine}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "c"
+                    }
+                  ],
+                  "response_format": "timeseries",
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Test values",
+              "show_legend": true,
+              "requests": [
+                {
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "length",
+                      "query": "avg:pulseops.machine_measurement{machine:machine-1,name:length_mm}"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "leak",
+                      "query": "avg:pulseops.machine_measurement{machine:machine-2,name:leak_rate_ml_min}"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "voltage",
+                      "query": "avg:pulseops.machine_measurement{machine:machine-3,name:output_voltage_v}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "length",
+                      "alias": "machine-1 length (mm)"
+                    },
+                    {
+                      "formula": "leak",
+                      "alias": "machine-2 leak rate (mL/min)"
+                    },
+                    {
+                      "formula": "voltage",
+                      "alias": "machine-3 output voltage (V)"
+                    }
+                  ],
+                  "response_format": "timeseries",
+                  "display_type": "line"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Pipeline health",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "type": "check_status",
+              "title": "Service /health (HTTP check)",
+              "check": "http.can_connect",
+              "grouping": "cluster",
+              "group_by": [],
+              "tags": [
+                "kube_namespace:pulseops"
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Consumption paused (MongoDB unavailable)",
+              "show_legend": true,
+              "requests": [
+                {
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "p",
+                      "query": "max:pulseops.consumer_paused{*} by {pod_name}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "p"
+                    }
+                  ],
+                  "response_format": "timeseries",
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Kafka consumer lag (pulseops-service)",
+              "show_legend": true,
+              "requests": [
+                {
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "l",
+                      "query": "sum:kafka.consumer_lag{consumer_group:pulseops-service} by {topic}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "l"
+                    }
+                  ],
+                  "response_format": "timeseries",
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Event latency (s, average)",
+              "show_legend": true,
+              "requests": [
+                {
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "sum",
+                      "query": "sum:pulseops.event_latency_seconds.sum{*}.as_count()"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "count",
+                      "query": "sum:pulseops.event_latency_seconds.count{*}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "sum / count",
+                      "alias": "average latency"
+                    }
+                  ],
+                  "response_format": "timeseries",
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Rejected messages",
+              "show_legend": true,
+              "requests": [
+                {
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "r",
+                      "query": "sum:pulseops.messages_rejected.count{*} by {topic,reason}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "r"
+                    }
+                  ],
+                  "response_format": "timeseries",
+                  "display_type": "bars"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Service replicas available",
+              "show_legend": true,
+              "requests": [
+                {
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "a",
+                      "query": "max:kubernetes_state.deployment.replicas_available{kube_namespace:pulseops,kube_deployment:pulseops-service}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "a"
+                    }
+                  ],
+                  "response_format": "timeseries",
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Container restarts (pulseops namespace)",
+              "show_legend": true,
+              "requests": [
+                {
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "r",
+                      "query": "max:kubernetes_state.container.restarts{kube_namespace:pulseops} by {pod_name}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "r"
+                    }
+                  ],
+                  "response_format": "timeseries",
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "MongoDB operations per second (mongo check)",
+              "show_legend": true,
+              "requests": [
+                {
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "i",
+                      "query": "sum:mongodb.opcounters.insertps{*}"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "u",
+                      "query": "sum:mongodb.opcounters.updateps{*}"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "q",
+                      "query": "sum:mongodb.opcounters.queryps{*}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "i",
+                      "alias": "inserts"
+                    },
+                    {
+                      "formula": "u",
+                      "alias": "updates"
+                    },
+                    {
+                      "formula": "q",
+                      "alias": "queries"
+                    }
+                  ],
+                  "response_format": "timeseries",
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "MongoDB connections (mongo check)",
+              "show_legend": true,
+              "requests": [
+                {
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "c",
+                      "query": "max:mongodb.connections.current{*}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "c"
+                    }
+                  ],
+                  "response_format": "timeseries",
+                  "display_type": "line"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "[PulseOps] Kafka consumer lag",
+  "type": "query alert",
+  "query": "avg(last_5m):sum:kafka.consumer_lag{consumer_group:pulseops-service} > 500",
+  "message": "{{#is_alert}}The pulseops-service consumer group is {{value}} messages behind.{{/is_alert}}\n{{#is_warning}}The pulseops-service consumer group is {{value}} messages behind.{{/is_warning}}\n{{#is_recovery}}The consumer group has caught up.{{/is_recovery}}",
+  "tags": [
+    "app:pulseops",
+    "managed-by:apply.sh"
+  ],
+  "options": {
+    "thresholds": {
+      "critical": 500,
+      "warning": 200
+    },
+    "require_full_window": false
+  }
+}

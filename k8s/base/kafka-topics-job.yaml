@@ -1,0 +1,36 @@
+# Creates both topics with 3 partitions once Kafka answers. Safe to re-run (--if-not-exists).
+# A Job's pod template can't be changed after creation: to change this file, delete the Job first
+# (kubectl delete job -n pulseops kafka-topics) and apply again.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-topics
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      containers:
+        - name: kafka-topics
+          image: apache/kafka   # tag pinned in kustomization.yaml (images:)
+          env:
+            - { name: BOOTSTRAP, value: "kafka-0.kafka.pulseops.svc.cluster.local:9092" }
+            - { name: KAFKA_HEAP_OPTS, value: "-Xmx256m" }
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              until /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOTSTRAP" --list >/dev/null 2>&1; do
+                echo "waiting for Kafka at $BOOTSTRAP"; sleep 3
+              done
+              for topic in machine.test-results machine.heartbeats; do
+                /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOTSTRAP" --create --if-not-exists \
+                  --topic "$topic" --partitions 3 --replication-factor 1
+              done
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOTSTRAP" --describe
+          resources:
+            requests: { cpu: 50m, memory: 256Mi }
+            limits: { memory: 512Mi }

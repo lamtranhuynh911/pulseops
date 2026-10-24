@@ -1,0 +1,17 @@
+{
+  "name": "[PulseOps] QA violations: {{type.name}}",
+  "type": "query alert",
+  "query": "sum(last_5m):sum:pulseops.qa_violations.count{*} by {type}.as_count() > 0",
+  "message": "{{#is_alert}}{{value}} {{type.name}} violation(s) in the last 5 minutes: products reached a machine without passing the previous one. GET /violations lists them.{{/is_alert}}\n{{#is_recovery}}No new {{type.name}} violations.{{/is_recovery}}",
+  "tags": [
+    "app:pulseops",
+    "managed-by:apply.sh"
+  ],
+  "options": {
+    "thresholds": {
+      "critical": 0
+    },
+    "require_full_window": false,
+    "include_tags": true
+  }
+}

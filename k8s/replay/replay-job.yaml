@@ -1,0 +1,44 @@
+# One-off Job that replays a mock-data scenario into Kafka (see "Replaying mock data" in the README).
+#
+# The CSVs come from the ConfigMap mock-data-replay, created from one scenario directory:
+#   kubectl create configmap mock-data-replay -n pulseops --from-file=mock-data/qa-violations/ \
+#     --dry-run=client -o yaml | kubectl apply -f -
+# Run it with "kubectl create" (not apply): generateName gives every run a new Job name.
+#   kubectl create -f k8s/replay/replay-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: replay-
+  namespace: pulseops
+  labels:
+    app.kubernetes.io/name: replay
+    app.kubernetes.io/part-of: pulseops
+spec:
+  # A retry republishes the same event_ids, which the service deduplicates.
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600   # finished Jobs clean themselves up after an hour
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: replay
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: replay
+          image: pulseops-simulator:dev
+          imagePullPolicy: IfNotPresent
+          args: ["replay", "/mock-data"]
+          env:
+            - { name: KAFKA_BOOTSTRAP_SERVERS, value: "kafka-0.kafka.pulseops.svc.cluster.local:9092" }
+            - { name: REPLAY_SPEED, value: "10" }   # 10x: a 10-minute scenario takes about a minute
+          volumeMounts:
+            - name: mock-data
+              mountPath: /mock-data
+              readOnly: true
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
+      volumes:
+        - name: mock-data
+          configMap:
+            name: mock-data-replay   # each CSV file becomes a file in /mock-data

@@ -1,0 +1,18 @@
+{
+  "name": "[PulseOps] Pass-rate drop: {{machine.name}}",
+  "type": "query alert",
+  "query": "sum(last_15m):sum:pulseops.tests.count{result:pass} by {machine}.as_count() / sum:pulseops.tests.count{*} by {machine}.as_count() < 0.9",
+  "message": "{{#is_alert}}Only {{value}} of the products tested at {{machine.name}} passed in the last 15 minutes (threshold {{threshold}}).{{/is_alert}}\n{{#is_warning}}The pass rate at {{machine.name}} is {{value}}.{{/is_warning}}\n{{#is_recovery}}The pass rate at {{machine.name}} is back to normal.{{/is_recovery}}",
+  "tags": [
+    "app:pulseops",
+    "managed-by:apply.sh"
+  ],
+  "options": {
+    "thresholds": {
+      "critical": 0.9,
+      "warning": 0.95
+    },
+    "require_full_window": false,
+    "include_tags": true
+  }
+}

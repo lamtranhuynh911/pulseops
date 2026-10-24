@@ -1,0 +1,82 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project state
+
+PulseOps is a proof of concept: machines 1–3 publish test results to Kafka, a Python service checks data integrity and production quality, stores everything in MongoDB, and exposes metrics that the Datadog Agent scrapes. Everything runs on a local Kubernetes cluster created with Kind. `README.md` is the design spec. Implemented: the service (`service/`), the simulator with its replay mode (`simulator/`), the Kustomize manifests (`k8s/`), and the replay Job (`k8s/replay/`). Datadog: Agent values in `datadog/values.yaml`, autodiscovery annotations on the pods, and the dashboard and monitors (`datadog/dashboard.json`, `datadog/monitors/*.json`), which `datadog/apply.sh` creates or updates through the Datadog API (idempotent, matched by title/name; edit the JSON, not the UI).
+
+The owner is using this project to learn Kubernetes. When writing manifests, prefer plain Kustomize manifests over third-party charts or operators for our own components (the Datadog Agent's official Helm chart is the exception), and briefly explain the Kubernetes concepts and choices involved. When implementing, follow the README, and update it if the design changes.
+
+Target runtime is Python 3.12 (`requires-python = ">=3.12"`); the dev machine's default `python3` may be newer.
+
+## Commands
+
+```bash
+python3 mock-data/generate.py     # regenerate the mock CSVs (stdlib only, fixed seed, deterministic)
+cd service && uv run pytest       # service tests (uv uses Python 3.12 from .python-version; pytest is in the dev group)
+cd service && uv run pytest tests/test_quality.py::test_name   # a single test
+cd simulator && uv run pytest     # simulator tests
+# service storage tests against a real MongoDB (skipped without MONGODB_TEST_URI):
+docker run -d --rm --name pulseops-test-mongo -p 127.0.0.1:27018:27017 mongo:7.0.45
+cd service && MONGODB_TEST_URI=mongodb://127.0.0.1:27018 uv run pytest
+```
+
+Cluster commands (once `k8s/` is written; full bring-up, including the Datadog Helm install, is in the README's "Deployment on Kind"):
+
+```bash
+kind create cluster --config k8s/kind-config.yaml        # cluster name: pulseops
+docker build -t pulseops-service:dev service && kind load docker-image pulseops-service:dev --name pulseops
+docker build -t pulseops-simulator:dev simulator && kind load docker-image pulseops-simulator:dev --name pulseops
+kubectl apply -k k8s/overlays/local                      # apply manifests; also re-applies k8s/base/simulator.env
+kubectl create -f k8s/replay/replay-job.yaml             # replay the scenario in the mock-data-replay ConfigMap (README)
+set -a; . ./.env; set +a; datadog/apply.sh               # create/update the Datadog dashboard and monitors
+kubectl rollout restart -n pulseops deployment/pulseops-service   # pick up a freshly loaded image
+kubectl port-forward -n pulseops svc/pulseops-service 8000:8000
+```
+
+There is no linter or formatter configured yet.
+
+## Architecture that spans several files
+
+**Two Kafka topics, keyed differently.** `machine.test-results` is keyed by `product_id`, so all of a product's results land on one partition; `machine.heartbeats` is keyed by `machine_id`. The service consumes both as consumer group `pulseops-service` (the Datadog consumer-lag check watches this group name).
+
+**Delivery semantics.** Offsets are committed only after the MongoDB write succeeds (at-least-once). Redelivery must be harmless: `test_results.event_id` is unique and writes are idempotent; a duplicate `event_id` must not skip the later steps (the QA check still runs), but counters only count a message the first time. Invalid messages go to `rejected_messages`, never dropped silently. The consumer reads batches of at most 100 records and processes a batch's partitions concurrently (order only matters within a partition), so heartbeats never wait behind slow test-result writes; this matters with a distant external MongoDB.
+
+**`LINE_SEQUENCE` drives both checks** (`machine-1,machine-2,machine-3`): it is the list of machines the integrity check expects, and it defines each machine's predecessor for the QA check.
+
+**The service runs as several replicas** (2 by default, at most 3 = partitions per topic), so a replica only sees the partitions it's assigned. **Never keep cross-message check state in memory**; it lives in MongoDB:
+- `machines.last_seen_at` is updated with `$max` using the service's processing time (not the machine's `timestamp`), so late or redelivered messages can't move it back.
+- Every replica runs the integrity and QA timers. Status changes use a conditional update (only if the stored status differs) and expired `pending_qa_checks` are claimed with `find_one_and_delete`, so exactly one replica records each change or violation. Violation writes must be idempotent too (deterministic `_id`), because of at-least-once redelivery.
+- Each replica exports its own metric series. Counters sum correctly across pods; `machine_up`/`machine_silence_seconds` come from shared state and are identical on every replica.
+
+**Data integrity check** (`service/pulseops/checks/integrity.py`): any message from a machine counts as a sign of life. It runs on a timer, not on message arrival, because a silent machine produces nothing to trigger it. Silent longer than `INTEGRITY_TIMEOUT_SECONDS` (15 s, three missed 5 s heartbeats) means `DOWN`. Machines that have never sent anything must be caught too.
+
+**QA check** (`service/pulseops/checks/quality.py`): on a result from machine N, look up the product's latest result at machine N-1 only (each hop is checked once, so nothing is reported twice). Previous `FAIL` gives `FAILED_UPSTREAM`; no previous result gives `MISSING_UPSTREAM`, but only after `QA_GRACE_SECONDS` (60 s), because machines publish independently and can arrive out of order. The pending check is stored in `pending_qa_checks` and resolved normally if the upstream result arrives in time. If the previous machine is `DOWN`, set `upstream_machine_down: true` on the violation. A `FAIL` by itself is not a violation. The latest result at a machine wins (retests allowed). Product status: `IN_PROGRESS`, `PASSED`, `FAILED`, or `NON_CONFORMING`.
+
+**Metrics and Datadog naming** (`metrics.py`, and the `ad.datadoghq.com/...checks` annotation on the service Deployment in `k8s/base/service.yaml`): expose Prometheus names with a `pulseops_` prefix (`pulseops_tests_total`). The OpenMetrics check uses `namespace: pulseops` with `raw_metric_prefix: pulseops_` and lists counters without `_total`; Datadog then shows `pulseops.tests.count`. Tag metrics by `machine` (and bounded labels like `result`, `type`), **never by product ID**: that would create a series per product and drive up custom-metric cost.
+
+**`/health`** returns `200` only when the Kafka consumer runs and reaches the broker and MongoDB is healthy, otherwise `503`, so the Datadog HTTP check also covers those dependencies. While the broker is unreachable the integrity and QA timers stop (a Kafka outage must not mark every machine `DOWN`) and wait `INTEGRITY_TIMEOUT_SECONDS` after it is back. It is the pod's readiness probe; do not use it as the liveness probe (use a TCP check), or a MongoDB outage would put the service into a restart loop.
+
+**A MongoDB outage pauses the service; it must never exit or restart because of it.** On a failed write: `consumer.pause()` all assigned partitions, hold the failed message, don't commit its offset, ping MongoDB with backoff, then retry the held message and `resume()`. Keep calling `getmany()` while paused, or aiokafka's `max_poll_interval_ms` expires and the replica is kicked out of the group. Partitions assigned during a rebalance start unpaused, so re-pause them in the rebalance listener. A replica that starts with MongoDB down starts paused. While paused, `/health` is `503`, `pulseops_consumer_paused` is `1`, and the integrity and QA timers stop. After resuming, the integrity check waits `INTEGRITY_TIMEOUT_SECONDS` before judging, so the unprocessed backlog doesn't mark machines `DOWN`.
+
+**MongoDB can be in-cluster or external.** The service only knows `MONGODB_URI` (from the `pulseops-mongodb` Secret, key `uri`) and `MONGODB_DATABASE` (default `pulseops`). Don't hard-code in-cluster hostnames, and create all indexes at startup so an empty external database works.
+
+## Kubernetes (Kind)
+
+- **Kustomize layout:** `k8s/base/` has everything except MongoDB; `k8s/overlays/local/` adds the MongoDB StatefulSet (and its Datadog annotation), and `k8s/overlays/external-mongodb/` is the base alone. For an external MongoDB the Datadog `mongo` check goes in `datadog/values-external-mongodb.yaml`, not an annotation.
+- **Topics have 3 partitions** (created by the `kafka-topics` Job). That caps useful service replicas at 3; extra replicas sit idle.
+- **Images are tagged `:dev` and loaded with `kind load docker-image`**; set `imagePullPolicy: IfNotPresent`. A `:latest` tag makes Kubernetes try to pull from a registry and fail with `ErrImagePull`.
+- **In-cluster MongoDB is 7.0, not 8.x.** MongoDB 8.0+ refuses to start on Linux kernel 6.19+ (SERVER-121912), and Kind pods run on the host kernel. The tag is pinned in `k8s/overlays/local/kustomization.yaml`.
+- **Kafka is a hand-written single-broker KRaft StatefulSet** with a headless Service. It must advertise `kafka-0.kafka.pulseops.svc.cluster.local:9092`, not `localhost`, or clients in other pods connect to themselves. Topics are created by the `kafka-topics` Job.
+- **Simulator settings live in `k8s/base/simulator.env`**, which a Kustomize `configMapGenerator` turns into the `simulator-config` ConfigMap. The name gets a content hash, so `kubectl apply -k k8s/overlays/local` rolls the simulator after every change. `.env` (git-ignored) holds `DD_API_KEY`/`DD_SITE` (into the `datadog-secret` Secret, `datadog` namespace) and `MONGODB_URI` (into the `pulseops-mongodb` Secret, `pulseops` namespace); both Secrets are created with `kubectl`, not Kustomize, so credentials never land in Git.
+- **Consumer offsets: `auto_offset_reset="none"`, positioned by the service.** aiokafka 0.13/0.14 misread committed offsets while a restarted broker loads them (aiokafka#1206) and would reset partitions; `Consumer.position_partitions` seeks to committed offsets with retries instead. Keep this until a fixed aiokafka is released.
+- **Datadog checks are autodiscovery annotations on the monitored pods** (OpenMetrics and HTTP checks on the service, `mongo` on the in-cluster MongoDB, `kafka_consumer` on Kafka), not `conf.d` files. The Agent's Helm values are in `datadog/values.yaml` (chart pinned to 3.261.0); Kind needs `datadog.kubelet.tlsVerify: false`, and `datadog.checksCardinality: orchestrator` is what gives check metrics their `pod_name` tag.
+
+## Mock data
+
+`mock-data/` holds fixed scenarios (`ideal/`, `qa-violations/`), one CSV per machine, exactly 60 rows each; `generate.py` refuses to write otherwise. Edit the `SCENARIOS` table in `generate.py` and regenerate rather than editing CSVs by hand. `mock-data/README.md` lists the expected outcome for every special product (11 violations, statuses 48/4/11, PASS/FAIL counts per machine). Use it as the ground truth for QA-check tests.
+
+- Columns after `timestamp` are measurements: they go into the message's `measurements` object, plus `"schema_version": 1`. Each machine has its own test column (`length_mm`, `leak_rate_ml_min`, `output_voltage_v`); keep those names in sync with the README's message example.
+- The two scenarios use separate product ranges (`P-000001`–`060`, `P-000101`–`163`) and time windows so they can be loaded into the same database. Reusing IDs would hide the bypass cases.
+- The CSVs contain no heartbeats. Replaying `qa-violations` without heartbeats leaves gaps of up to about 20 s, which exceeds the 15 s integrity timeout and falsely marks machines `DOWN`.
