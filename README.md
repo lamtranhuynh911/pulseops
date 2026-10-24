@@ -135,6 +135,8 @@ The service never exits or restarts because MongoDB is down. Instead it stops co
 
 A replica that starts while MongoDB is unavailable starts paused in the same way.
 
+A Kafka outage is handled the same way for the checks: every few seconds each replica checks that the broker answers. While it doesn't, no machine data can arrive, so the integrity and QA timers stop instead of marking every machine `DOWN`, and `/health` returns `503`. When the broker is back, the timers wait `INTEGRITY_TIMEOUT_SECONDS` before judging again.
+
 ## Data model
 
 ### Kafka topics
@@ -192,7 +194,7 @@ The service creates its indexes at startup, so it can start against an empty dat
 | Endpoint | Used by | Returns |
 |---|---|---|
 | `GET /metrics` | Datadog Agent (OpenMetrics check) | Metrics in Prometheus/OpenMetrics text format |
-| `GET /health` | Datadog HTTP check, Kubernetes readiness probe | `200` if the Kafka consumer is running and MongoDB is reachable, otherwise `503` (including while paused); the body lists each dependency's status |
+| `GET /health` | Datadog HTTP check, Kubernetes readiness probe | `200` if the Kafka consumer is running and reaches the broker, and MongoDB is reachable; otherwise `503` (including while paused); the body lists each dependency's status |
 | `GET /machines` | Operators, debugging | Integrity status and last-seen time of each machine |
 | `GET /products/{product_id}` | Operators, debugging | The product's result at each machine, and its status |
 | `GET /violations` | Operators, debugging | Recent QA violations, filterable by `since` and `type` |
@@ -212,7 +214,7 @@ Interactive API docs are served at `/docs`.
 | `pulseops.consumer_paused` | gauge | none | `1` while the replica has paused consumption because MongoDB is unavailable |
 | `pulseops.event_latency_seconds.*` | histogram | none | Time from the machine's timestamp until the service has processed the message |
 
-On `/metrics` the names follow Prometheus conventions: a `pulseops_` prefix, and `_total` on counters. For example, `pulseops_tests_total` arrives in Datadog as `pulseops.tests.count`. The Agent adds a `pod_name` tag, so each replica is its own series (see [Running several replicas](#running-several-replicas)).
+On `/metrics` the names follow Prometheus conventions: a `pulseops_` prefix, and `_total` on counters. For example, `pulseops_tests_total` arrives in Datadog as `pulseops.tests.count`. The Agent adds a `pod_name` tag (`datadog.checksCardinality: orchestrator` in `datadog/values.yaml`; at the Agent's default, `low`, the replicas' series would collide), so each replica is its own series (see [Running several replicas](#running-several-replicas)).
 
 Metrics are tagged by machine, never by product. Product-level detail lives in MongoDB; a product ID tag would create a new metric series for every product and drive up Datadog custom-metric costs.
 
@@ -230,16 +232,37 @@ Faults are injected through the simulator settings in `k8s/base/simulator.env`. 
 | A service replica crashes | `kubectl delete pod -n pulseops <one pulseops-service pod>` | The other replica takes over its partitions and Kubernetes starts a replacement. No machine is marked `DOWN` and no results are lost. |
 | MongoDB goes down | `kubectl scale -n pulseops statefulset/mongodb --replicas=0` | Service pods become not ready but are not restarted, `consumer_paused` is `1`, and consumer lag grows. Scale back to `1`: the service resumes, lag drains, and every result is stored. |
 
+### Replaying mock data
+
+The fixed scenarios in [`mock-data/`](mock-data/README.md) can be published into the running stack, so the result can be compared with the expected outcome listed there (for `qa-violations`: 11 violations and product statuses 48 `PASSED`, 4 `FAILED`, 11 `NON_CONFORMING`). The simulator image has a `replay` command that publishes a scenario's results in timestamp order, 10 times faster than recorded, with their original `event_id`s and timestamps, and sends a heartbeat per machine every 5 seconds while it runs. It runs as a one-off Kubernetes Job:
+
+```bash
+# Load one scenario into a ConfigMap; each CSV becomes a file in the Job's /mock-data directory
+kubectl create configmap mock-data-replay -n pulseops --from-file=mock-data/qa-violations/ \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl create -f k8s/replay/replay-job.yaml       # create, not apply: every run gets a new Job name
+kubectl logs -n pulseops -l app.kubernetes.io/name=replay -f
+```
+
+`MISSING_UPSTREAM` violations appear once the 60-second grace period has passed. Running the same replay again changes nothing, because every result is deduplicated by `event_id`. The two scenarios use separate product IDs, so both can be replayed into the same database, next to the simulator's live data. Replayed timestamps are from 2026-10-15, so `pulseops.event_latency_seconds` spikes during a replay.
+
 ## Deployment on Kind
 
 ### Prerequisites
 
-Docker, [kind](https://kind.sigs.k8s.io/), `kubectl`, and `helm`.
+Docker, [kind](https://kind.sigs.k8s.io/), `kubectl`, and `helm` (for example `brew install kind kubernetes-cli helm`), and [uv](https://docs.astral.sh/uv/) to run the tests. The stack needs about 4–5 GB of memory.
+
+On Linux, raise the inotify limits first, or pods can fail with "too many open files" ([kind known issue](https://kind.sigs.k8s.io/docs/user/known-issues/#pod-errors-due-to-too-many-open-files)):
+
+```bash
+printf 'fs.inotify.max_user_watches=524288\nfs.inotify.max_user_instances=512\n' | sudo tee /etc/sysctl.d/99-kind.conf
+sudo sysctl --system
+```
 
 ### Bring the stack up
 
 ```bash
-cp .env.example .env                       # fill in DD_API_KEY and DD_SITE; keep MONGODB_URI for in-cluster MongoDB
+cp .env.example .env                       # fill in DD_API_KEY, DD_APP_KEY and DD_SITE; keep MONGODB_URI for in-cluster MongoDB
 set -a; . ./.env; set +a
 kind create cluster --config k8s/kind-config.yaml
 
@@ -247,18 +270,24 @@ kind create cluster --config k8s/kind-config.yaml
 docker build -t pulseops-service:dev service
 docker build -t pulseops-simulator:dev simulator
 kind load docker-image pulseops-service:dev pulseops-simulator:dev --name pulseops
+# If that fails with "content digest ... not found" (Docker's containerd image store), load an archive:
+#   docker save -o /tmp/images.tar pulseops-service:dev pulseops-simulator:dev
+#   kind load image-archive /tmp/images.tar --name pulseops
 
 # Datadog Agent
 kubectl create namespace datadog
 kubectl create secret generic datadog-secret -n datadog --from-literal api-key="$DD_API_KEY"
 helm repo add datadog https://helm.datadoghq.com
-helm install datadog-agent datadog/datadog -n datadog -f datadog/values.yaml --set datadog.site="$DD_SITE"
+helm install datadog-agent datadog/datadog -n datadog --version 3.261.0 -f datadog/values.yaml --set datadog.site="$DD_SITE"
 
 # PulseOps: Kafka, MongoDB, service, simulator
 kubectl create namespace pulseops
 kubectl create secret generic pulseops-mongodb -n pulseops --from-literal uri="$MONGODB_URI"
 kubectl apply -k k8s/overlays/local
 kubectl get pods -n pulseops -w            # wait until everything is Running and Ready
+
+# Datadog dashboard and monitors (uses DD_API_KEY, DD_APP_KEY, DD_SITE; safe to re-run after editing the JSON)
+datadog/apply.sh
 
 # Reach the API from your machine
 kubectl port-forward -n pulseops svc/pulseops-service 8000:8000   # then open http://localhost:8000/docs
@@ -284,7 +313,7 @@ The service reads its connection string from the `uri` key of the `pulseops-mong
    `kubectl apply` only creates and updates resources, so the StatefulSet has to be deleted explicitly. Its PersistentVolumeClaim (the data) is kept until you delete it too.
 3. Point the Datadog MongoDB check at the external instance. An annotation can only describe a pod in the cluster, so for an external MongoDB the check is configured in the Agent's Helm values instead:
    ```bash
-   helm upgrade datadog-agent datadog/datadog -n datadog \
+   helm upgrade datadog-agent datadog/datadog -n datadog --version 3.261.0 \
      -f datadog/values.yaml -f datadog/values-external-mongodb.yaml --set datadog.site="$DD_SITE"
    ```
 
@@ -302,7 +331,7 @@ To switch back, set `MONGODB_URI` to `mongodb://mongodb:27017`, recreate the Sec
 |---|---|---|
 | `kafka` | StatefulSet (1 replica) + headless Service | KRaft mode, no ZooKeeper. The broker advertises its stable DNS name, `kafka-0.kafka.pulseops.svc.cluster.local:9092`, which only a StatefulSet pod gets. |
 | `kafka-topics` | Job | Creates `machine.test-results` and `machine.heartbeats` with 3 partitions each once Kafka is up. |
-| `mongodb` | StatefulSet (1 replica) + headless Service, `local` overlay only | Data on a PersistentVolumeClaim from Kind's default `standard` StorageClass, so it survives pod restarts but not `kind delete cluster`. Carries the Datadog annotation for the MongoDB check. |
+| `mongodb` | StatefulSet (1 replica) + headless Service, `local` overlay only | MongoDB 7.0: MongoDB 8.0 and later refuse to start on Linux kernel 6.19 and newer ([SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912)), and pods run on the host's kernel. Data on a PersistentVolumeClaim from Kind's default `standard` StorageClass, so it survives pod restarts but not `kind delete cluster`. Carries the Datadog annotation for the MongoDB check. |
 | `pulseops-mongodb` | Secret, created with `kubectl` | The MongoDB connection string. Kept out of Git because an external URI contains credentials. |
 | `pulseops-service` | Deployment (2 replicas) + Service | Readiness probe on `/health`; liveness probe is a TCP check on the port. Carries the Datadog annotations for the OpenMetrics and HTTP checks. |
 | `simulator` | Deployment (1 replica) | Settings from the `simulator-config` ConfigMap, generated from `k8s/base/simulator.env`. |
@@ -314,7 +343,7 @@ Some of these choices are deliberate:
 - **Images are tagged `:dev`, not `:latest`.** Kubernetes always tries to pull `:latest` images from a registry and fails, because the images exist only on the Kind node. With any other tag it uses the loaded image (`imagePullPolicy: IfNotPresent`).
 - **MongoDB is swapped with Kustomize overlays.** `k8s/base/` holds everything except MongoDB; `k8s/overlays/local/` adds the in-cluster MongoDB, and `k8s/overlays/external-mongodb/` uses the base as it is.
 - **Datadog checks are pod annotations,** not files mounted into the Agent. When a pod is rescheduled and its IP changes, the Agent follows it automatically. The exception is the check for an external MongoDB, which has no pod.
-- **Kind needs `datadog.kubelet.tlsVerify: false`** in `datadog/values.yaml`, because Kind's kubelet uses a self-signed certificate.
+- **Kind needs `datadog.kubelet.tlsVerify: false`** in `datadog/values.yaml`, because Kind's kubelet uses a self-signed certificate. The values also set `datadog.clusterName` (Kind's can't be detected) and turn off the Datadog Operator, which recent charts install by default; this chart manages the Agent itself.
 
 ## Repository layout
 
@@ -328,13 +357,18 @@ pulseops/
 ├── k8s/
 │   ├── kind-config.yaml   Kind cluster definition (single node, cluster name "pulseops")
 │   ├── base/              Namespace, Kafka, service, simulator; simulator.env (fault injection)
+│   ├── replay/            One-off Job that replays a mock-data scenario
 │   └── overlays/
 │       ├── local/             base + in-cluster MongoDB (the default)
 │       └── external-mongodb/  base only; the service connects to MONGODB_URI
 ├── datadog/             Helm values for the Agent (values.yaml, values-external-mongodb.yaml);
-│                        dashboard and monitor definitions (JSON)
+│                        dashboard.json and monitors/*.json, applied by apply.sh
 └── .env.example         Datadog credentials and the MongoDB connection string
 ```
+
+## Known limitations
+
+- **aiokafka can misread committed offsets right after a Kafka restart** ([aiokafka#1206](https://github.com/aio-libs/aiokafka/issues/1206), open in 0.13 and 0.14): while the broker is still loading them, they look missing, and aiokafka would reset the partition to the beginning, replaying the whole topic. The service works around it: it uses `auto_offset_reset="none"`, positions partitions itself when they are assigned, and asks for a missing offset again for about 8 seconds before starting a partition from the beginning. Remove the workaround once a fixed aiokafka is released.
 
 ## Beyond the PoC
 

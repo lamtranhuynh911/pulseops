@@ -58,6 +58,8 @@ The two scenarios use different times and product numbers, so both can be loaded
 
 The files hold test results only, no heartbeats. When replaying `qa-violations`, also send a heartbeat for each machine every 5 seconds, as real machines would: where a product is missing from a file, consecutive rows are up to about 20 seconds apart, which is longer than the 15-second integrity timeout. In `ideal`, rows are never more than about 11 seconds apart.
 
+To replay a scenario into the running stack (with heartbeats), use the replay Job described in [Replaying mock data](../README.md#replaying-mock-data) in the main README.
+
 ## Scenario 1: `ideal`
 
 60 products go through all three machines and pass every test, so all three files contain the same 60 products.
