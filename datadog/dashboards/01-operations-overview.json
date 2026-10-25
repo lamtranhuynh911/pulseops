@@ -1,0 +1,1164 @@
+{
+  "title": "PulseOps – Operations Overview",
+  "description": "Demo dashboard: PulseOps line operations – machines UP/DOWN, throughput, pass rate, QA violations, open alerts and pipeline health.",
+  "layout_type": "ordered",
+  "reflow_type": "fixed",
+  "template_variables": [
+    {
+      "name": "machine",
+      "prefix": "machine",
+      "available_values": [],
+      "default": "*"
+    }
+  ],
+  "widgets": [
+    {
+      "definition": {
+        "type": "note",
+        "content": "**PulseOps – Operations Overview** · Line machine-1 → machine-2 → machine-3 (Kafka → pulseops-service → MongoDB). All widgets follow the time range at the top right. *No data* means the PulseOps cluster was not running: pick a range when it was (for example **Past 1 Day**). Widgets marked **ⓝ** use new metrics and show data once the new service version is deployed.",
+        "background_color": "blue",
+        "font_size": "14",
+        "text_align": "left",
+        "vertical_align": "top",
+        "show_tick": false,
+        "has_padding": true
+      },
+      "layout": {
+        "width": 12,
+        "height": 2,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "Machines UP",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "up",
+                "query": "max:pulseops.machine_up{$machine} by {machine}",
+                "aggregator": "last"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "count_nonzero(up)",
+                "number_format": {
+                  "unit": {
+                    "type": "custom_unit_label",
+                    "label": "/ 3"
+                  }
+                },
+                "conditional_formats": [
+                  {
+                    "comparator": "<",
+                    "value": 3,
+                    "palette": "white_on_red"
+                  },
+                  {
+                    "comparator": ">=",
+                    "value": 3,
+                    "palette": "white_on_green"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 0
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 0,
+        "y": 2
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "Alerts raised",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "events",
+                "name": "a",
+                "search": {
+                  "query": "source:alert app:pulseops status:(error OR warn)"
+                },
+                "compute": {
+                  "aggregation": "count"
+                }
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "default_zero(a)",
+                "conditional_formats": [
+                  {
+                    "comparator": ">",
+                    "value": 0,
+                    "palette": "white_on_red"
+                  },
+                  {
+                    "comparator": "<=",
+                    "value": 0,
+                    "palette": "white_on_green"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 0
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 2,
+        "y": 2
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "Products tested",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "t",
+                "query": "sum:pulseops.tests.count{$machine}.as_count()",
+                "aggregator": "sum"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "t"
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 0
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 4,
+        "y": 2
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "Pass rate",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "p",
+                "query": "sum:pulseops.tests.count{$machine,result:pass}.as_count()",
+                "aggregator": "sum"
+              },
+              {
+                "data_source": "metrics",
+                "name": "t",
+                "query": "sum:pulseops.tests.count{$machine}.as_count()",
+                "aggregator": "sum"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "100 * p / t",
+                "number_format": {
+                  "unit": {
+                    "type": "custom_unit_label",
+                    "label": "%"
+                  }
+                },
+                "conditional_formats": [
+                  {
+                    "comparator": "<",
+                    "value": 90,
+                    "palette": "white_on_red"
+                  },
+                  {
+                    "comparator": "<",
+                    "value": 97,
+                    "palette": "white_on_yellow"
+                  },
+                  {
+                    "comparator": ">=",
+                    "value": 97,
+                    "palette": "white_on_green"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 1
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 6,
+        "y": 2
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "QA violations",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "v",
+                "query": "sum:pulseops.qa_violations.count{$machine}.as_count()",
+                "aggregator": "sum"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "default_zero(v)",
+                "conditional_formats": [
+                  {
+                    "comparator": ">",
+                    "value": 0,
+                    "palette": "white_on_red"
+                  },
+                  {
+                    "comparator": "<=",
+                    "value": 0,
+                    "palette": "white_on_green"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 0
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 8,
+        "y": 2
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "Avg processing latency",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "s",
+                "query": "sum:pulseops.event_latency_seconds.sum{*}.as_count()",
+                "aggregator": "sum"
+              },
+              {
+                "data_source": "metrics",
+                "name": "c",
+                "query": "sum:pulseops.event_latency_seconds.count{*}.as_count()",
+                "aggregator": "sum"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "s / c",
+                "number_format": {
+                  "unit": {
+                    "type": "custom_unit_label",
+                    "label": "s"
+                  }
+                },
+                "conditional_formats": [
+                  {
+                    "comparator": ">",
+                    "value": 5,
+                    "palette": "white_on_red"
+                  },
+                  {
+                    "comparator": ">",
+                    "value": 1,
+                    "palette": "white_on_yellow"
+                  },
+                  {
+                    "comparator": "<=",
+                    "value": 1,
+                    "palette": "white_on_green"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 2
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 10,
+        "y": 2
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "Fail rate",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "f",
+                "query": "sum:pulseops.tests.count{$machine,result:fail}.as_count()",
+                "aggregator": "sum"
+              },
+              {
+                "data_source": "metrics",
+                "name": "t",
+                "query": "sum:pulseops.tests.count{$machine}.as_count()",
+                "aggregator": "sum"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "100 * default_zero(f) / t",
+                "number_format": {
+                  "unit": {
+                    "type": "custom_unit_label",
+                    "label": "%"
+                  }
+                },
+                "conditional_formats": [
+                  {
+                    "comparator": ">",
+                    "value": 10,
+                    "palette": "white_on_red"
+                  },
+                  {
+                    "comparator": ">",
+                    "value": 3,
+                    "palette": "white_on_yellow"
+                  },
+                  {
+                    "comparator": "<=",
+                    "value": 3,
+                    "palette": "white_on_green"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 1
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 0,
+        "y": 4
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "QA violations / 100 products",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "v",
+                "query": "sum:pulseops.qa_violations.count{$machine}.as_count()",
+                "aggregator": "sum"
+              },
+              {
+                "data_source": "metrics",
+                "name": "t",
+                "query": "sum:pulseops.tests.count{$machine}.as_count()",
+                "aggregator": "sum"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "100 * default_zero(v) / t",
+                "conditional_formats": [
+                  {
+                    "comparator": ">",
+                    "value": 0,
+                    "palette": "white_on_red"
+                  },
+                  {
+                    "comparator": "<=",
+                    "value": 0,
+                    "palette": "white_on_green"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 2
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 2,
+        "y": 4
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "Machine downtime",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "u",
+                "query": "avg:pulseops.machine_up{$machine}",
+                "aggregator": "avg"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "100 * (1 - u)",
+                "number_format": {
+                  "unit": {
+                    "type": "custom_unit_label",
+                    "label": "%"
+                  }
+                },
+                "conditional_formats": [
+                  {
+                    "comparator": ">",
+                    "value": 0,
+                    "palette": "white_on_red"
+                  },
+                  {
+                    "comparator": "<=",
+                    "value": 0,
+                    "palette": "white_on_green"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 1
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 4,
+        "y": 4
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "Line yield ⓝ",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "p",
+                "query": "sum:pulseops.product_status_changes.count{status:passed}.as_count()",
+                "aggregator": "sum"
+              },
+              {
+                "data_source": "metrics",
+                "name": "f",
+                "query": "sum:pulseops.product_status_changes.count{status:failed}.as_count()",
+                "aggregator": "sum"
+              },
+              {
+                "data_source": "metrics",
+                "name": "n",
+                "query": "sum:pulseops.product_status_changes.count{status:non_conforming}.as_count()",
+                "aggregator": "sum"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "100 * default_zero(p) / (default_zero(p) + default_zero(f) + default_zero(n))",
+                "number_format": {
+                  "unit": {
+                    "type": "custom_unit_label",
+                    "label": "%"
+                  }
+                },
+                "conditional_formats": [
+                  {
+                    "comparator": "<",
+                    "value": 90,
+                    "palette": "white_on_red"
+                  },
+                  {
+                    "comparator": "<",
+                    "value": 97,
+                    "palette": "white_on_yellow"
+                  },
+                  {
+                    "comparator": ">=",
+                    "value": 97,
+                    "palette": "white_on_green"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 1
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 6,
+        "y": 4
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "Avg line time ⓝ",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "s",
+                "query": "sum:pulseops.product_line_seconds.sum{*}.as_count()",
+                "aggregator": "sum"
+              },
+              {
+                "data_source": "metrics",
+                "name": "c",
+                "query": "sum:pulseops.product_line_seconds.count{*}.as_count()",
+                "aggregator": "sum"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "s / c",
+                "number_format": {
+                  "unit": {
+                    "type": "custom_unit_label",
+                    "label": "s"
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 1
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 8,
+        "y": 4
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "Pending QA checks ⓝ",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "q",
+                "query": "max:pulseops.pending_qa_checks{*}",
+                "aggregator": "last"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "q",
+                "conditional_formats": [
+                  {
+                    "comparator": ">",
+                    "value": 10,
+                    "palette": "white_on_yellow"
+                  },
+                  {
+                    "comparator": "<=",
+                    "value": 10,
+                    "palette": "white_on_green"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 0
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 10,
+        "y": 4
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Production line",
+        "layout_type": "ordered",
+        "background_color": "vivid_green",
+        "show_title": true,
+        "widgets": [
+          {
+            "definition": {
+              "type": "query_table",
+              "title": "Machine status (1 = UP, 0 = DOWN)",
+              "title_size": "16",
+              "title_align": "left",
+              "requests": [
+                {
+                  "response_format": "scalar",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "up",
+                      "query": "max:pulseops.machine_up{$machine} by {machine}",
+                      "aggregator": "last"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "silence",
+                      "query": "max:pulseops.machine_silence_seconds{$machine} by {machine}",
+                      "aggregator": "last"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "up",
+                      "alias": "UP",
+                      "conditional_formats": [
+                        {
+                          "comparator": "<",
+                          "value": 1,
+                          "palette": "white_on_red"
+                        },
+                        {
+                          "comparator": ">=",
+                          "value": 1,
+                          "palette": "white_on_green"
+                        }
+                      ]
+                    },
+                    {
+                      "formula": "silence",
+                      "alias": "Silent for (s)"
+                    }
+                  ]
+                }
+              ],
+              "has_search_bar": "auto"
+            },
+            "layout": {
+              "width": 4,
+              "height": 4,
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Throughput (products / min)",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "t",
+                      "query": "sum:pulseops.tests.count{$machine} by {machine}.as_count().rollup(sum, 60)"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "t"
+                    }
+                  ],
+                  "display_type": "bars",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 4,
+              "x": 4,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "QA violations by type",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "v",
+                      "query": "sum:pulseops.qa_violations.count{$machine} by {type,machine}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "v"
+                    }
+                  ],
+                  "display_type": "bars",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 4,
+              "x": 8,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Completed products by status ⓝ",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "s",
+                      "query": "sum:pulseops.product_status_changes.count{*} by {status}.as_count().rollup(sum, 300)"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "s"
+                    }
+                  ],
+                  "display_type": "bars",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 6,
+              "height": 3,
+              "x": 0,
+              "y": 4
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Fail rate by machine (%)",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "f",
+                      "query": "sum:pulseops.tests.count{$machine,result:fail} by {machine}.as_count().rollup(sum, 300)"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "t",
+                      "query": "sum:pulseops.tests.count{$machine} by {machine}.as_count().rollup(sum, 300)"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "100 * default_zero(f) / t",
+                      "alias": "fail_rate"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 6,
+              "height": 3,
+              "x": 6,
+              "y": 4
+            }
+          }
+        ]
+      },
+      "layout": {
+        "width": 12,
+        "height": 8,
+        "x": 0,
+        "y": 6
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Alerts & incidents",
+        "layout_type": "ordered",
+        "background_color": "vivid_orange",
+        "show_title": true,
+        "widgets": [
+          {
+            "definition": {
+              "type": "manage_status",
+              "title": "PulseOps monitor status",
+              "title_size": "16",
+              "title_align": "left",
+              "display_format": "countsAndList",
+              "color_preference": "text",
+              "hide_zero_counts": true,
+              "query": "\"[PulseOps]\"",
+              "sort": "status,asc",
+              "summary_type": "monitors",
+              "show_last_triggered": true,
+              "show_priority": false
+            },
+            "layout": {
+              "width": 5,
+              "height": 4,
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "list_stream",
+              "title": "Recent alerts (trigger / warn / recover)",
+              "title_size": "16",
+              "title_align": "left",
+              "requests": [
+                {
+                  "response_format": "event_list",
+                  "query": {
+                    "data_source": "event_stream",
+                    "query_string": "source:alert app:pulseops",
+                    "event_size": "s"
+                  },
+                  "columns": [
+                    {
+                      "field": "timestamp",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "status_line",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "title",
+                      "width": "full"
+                    }
+                  ]
+                }
+              ]
+            },
+            "layout": {
+              "width": 7,
+              "height": 4,
+              "x": 5,
+              "y": 0
+            }
+          }
+        ]
+      },
+      "layout": {
+        "width": 12,
+        "height": 5,
+        "x": 0,
+        "y": 14
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Pipeline",
+        "layout_type": "ordered",
+        "background_color": "vivid_purple",
+        "show_title": true,
+        "widgets": [
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Kafka consumer lag",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "l",
+                      "query": "sum:kafka.consumer_lag{consumer_group:pulseops-service} by {topic}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "l"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Processing latency (s, avg)",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "s",
+                      "query": "sum:pulseops.event_latency_seconds.sum{*}.as_count()"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "c",
+                      "query": "sum:pulseops.event_latency_seconds.count{*}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "s / c",
+                      "alias": "latency_s"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 4,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Consumer pause (MongoDB unavailable)",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "p",
+                      "query": "max:pulseops.consumer_paused{*} by {pod_name}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "p"
+                    }
+                  ],
+                  "display_type": "bars",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 8,
+              "y": 0
+            }
+          }
+        ]
+      },
+      "layout": {
+        "width": 12,
+        "height": 4,
+        "x": 0,
+        "y": 19
+      }
+    }
+  ]
+}

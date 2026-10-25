@@ -7,6 +7,7 @@ records and logs it.
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -48,15 +49,18 @@ class MachineStore(Protocol):
 
 
 class IntegrityCheck:
-    def __init__(self, store: MachineStore, timeout_s: float):
+    def __init__(self, store: MachineStore, timeout_s: float,
+                 on_change: Callable[[MachineState], None] = lambda state: None):
         self.store = store
         self.timeout_s = timeout_s
+        self.on_change = on_change  # called once per status change, by the replica that recorded it
 
     async def run_once(self, now: datetime) -> list[MachineState]:
         last_seen, tracked_since = await self.store.machine_times()
         states = evaluate(last_seen, tracked_since, now, self.timeout_s)
         for state in states:
             if await self.store.set_machine_status(state.machine_id, state.status, now):
+                self.on_change(state)
                 if state.status == DOWN:
                     log.warning("%s is DOWN: no data for %.0f s", state.machine_id, state.silence_s)
                 else:

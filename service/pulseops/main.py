@@ -47,7 +47,10 @@ async def lifespan(app: FastAPI):
         storage, settings.line_sequence, settings.qa_grace_s,
         on_violation=lambda v: metrics.QA_VIOLATIONS.labels(v.machine_id, v.type).inc(),
     )
-    integrity = IntegrityCheck(storage, settings.integrity_timeout_s)
+    integrity = IntegrityCheck(
+        storage, settings.integrity_timeout_s,
+        on_change=lambda m: metrics.MACHINE_STATUS_CHANGES.labels(m.machine_id, m.status).inc(),
+    )
     consumer = Consumer(settings, storage, quality, state)
     app.state.service = state
     app.state.storage = storage
@@ -67,6 +70,8 @@ async def lifespan(app: FastAPI):
         now = datetime.now(timezone.utc)
         if state.can_judge(now):
             await quality.expire_pending(now)
+            # Shared state in MongoDB, like machine_up: every replica reports the same value.
+            metrics.PENDING_QA_CHECKS.set(await storage.count_pending())
 
     async def mongodb_health() -> None:
         try:

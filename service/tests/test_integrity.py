@@ -53,3 +53,16 @@ def test_status_changes_are_recorded_once(caplog):
 
     asyncio.run(scenario())
     assert [r.getMessage() for r in caplog.records] == ["machine-1 is UP", "machine-1 is DOWN: no data for 16 s", "machine-1 is UP"]
+
+
+def test_on_change_is_called_once_per_status_change():
+    store = MemoryMachines()
+    changes = []
+    check = IntegrityCheck(store, TIMEOUT_S, on_change=lambda state: changes.append(state.status))
+
+    async def scenario():
+        for seconds in (1, 2, 16, 17):
+            await check.run_once(T0 + timedelta(seconds=seconds))
+
+    asyncio.run(scenario())
+    assert changes == [UP, DOWN]
