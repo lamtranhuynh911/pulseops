@@ -290,7 +290,7 @@ helm repo add datadog https://helm.datadoghq.com
 helm install datadog-agent datadog/datadog -n datadog --version 3.261.0 -f datadog/values.yaml --set datadog.site="$DD_SITE"
 
 # PulseOps: Kafka, MongoDB, service, simulator
-kubectl create namespace pulseops
+kubectl apply -f k8s/base/namespace.yaml  # the namespace first (the Secret goes into it), with apply, as apply -k manages it later
 kubectl create secret generic pulseops-mongodb -n pulseops --from-literal uri="$MONGODB_URI"
 kubectl apply -k k8s/overlays/local        # with an external MONGODB_URI: k8s/overlays/external-mongodb
 kubectl get pods -n pulseops -w            # wait until everything is Running and Ready
@@ -322,7 +322,7 @@ The service reads its connection string from the `uri` key of the `pulseops-mong
    kubectl rollout restart -n pulseops deployment/pulseops-service
    ```
    `kubectl apply` only creates and updates resources, so the StatefulSet has to be deleted explicitly. Its PersistentVolumeClaim (the data) is kept until you delete it too.
-3. Point the Datadog MongoDB check at the external instance. An annotation can only describe a pod in the cluster, so for an external MongoDB the check is configured in the Agent's Helm values instead. It logs in as a read-only `datadog` user; create it once with an admin login, and put its password in `.env` as `DD_MONGODB_PASSWORD`:
+3. Point the Datadog MongoDB check at the external instance. An annotation can only describe a pod in the cluster, so for an external MongoDB the check is configured in the Agent's Helm values instead. It logs in as a read-only `datadog` user. Create that user once, in the `admin` database, with an admin login. `passwordPrompt()` asks for the new user's password: choose a strong one (for example from `openssl rand -hex 16`), and put the same value in `.env` as `DD_MONGODB_PASSWORD=<the password>` (`.env` is git-ignored; `.env.example` is committed). The check needs all four roles below; with only `read` on `pulseops` it can't run `serverStatus`, for example:
    ```bash
    mongosh "mongodb://<admin-user>@<host>:<port>/admin" --eval '
    db.getSiblingDB("admin").createUser({user: "datadog", pwd: passwordPrompt(), roles: [
