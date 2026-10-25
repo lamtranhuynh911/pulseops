@@ -151,8 +151,12 @@ class QualityCheck:
             upstream_result = (await self.store.latest_results(check.product_id)).get(check.upstream_machine_id)
             await self._judge(check.product_id, check.machine_id, check.upstream_machine_id, check.event_id,
                               upstream_result, now, check)
-            await self.store.finish_pending(check)  # only now: until here the lease protects it
+            # Refreshed before the delete too: a stored violation makes the status final (NON_CONFORMING),
+            # so a failure or SIGTERM after the delete can't leave it IN_PROGRESS. A failure before the
+            # delete leaves the leased check, which is judged and refreshed again.
             await self.store.refresh_product_status(check.product_id)
+            await self.store.finish_pending(check)  # only now: until here the lease protects it
+            await self.store.refresh_product_status(check.product_id)  # no longer pending
             handled += 1
         return handled
 

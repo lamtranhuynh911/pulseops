@@ -14,6 +14,7 @@ from pulseops.concurrency import gather_all
 from pulseops.config import Settings
 from pulseops.consumer import Consumer, ServiceState, _Rebalance
 from pulseops.models import TestResult
+from pulseops.storage import DuplicateVerdicts
 
 Record = namedtuple("Record", "topic partition offset value timestamp")
 A = TopicPartition("machine.test-results", 0)
@@ -202,6 +203,68 @@ def test_mongodb_operation_failure_is_held_not_rejected(monkeypatch):
         await resume_now(consumer)
         await until(lambda: consumer.kafka.commits == [(A, 11)])
         await consumer.stop_workers([A])
+
+    asyncio.run(scenario())
+
+
+def test_a_restarted_consumer_starts_paused_and_pings_until_mongodb_answers(monkeypatch):
+    monkeypatch.setattr(consumer_module, "MAX_PING_BACKOFF_S", 0.01)
+
+    async def scenario():
+        storage = FakeStorage()
+        storage.up = False
+        pings = []
+        ping = storage.ping
+
+        async def counted_ping():
+            pings.append(1)
+            await ping()
+
+        async def nothing():
+            pass
+
+        async def getmany(timeout_ms):
+            await asyncio.sleep(0.005)
+            return {}
+
+        storage.ping = counted_ping
+        consumer = await make_consumer(storage)   # the state a crashed run leaves: unpaused, prepared
+        consumer.resumed.clear()
+        consumer._ping_backoff = 0.01
+        consumer._start_kafka, consumer.kafka.getmany, consumer.kafka.stop = nothing, getmany, nothing
+        run = asyncio.create_task(consumer.run())   # what the supervisor in main.py does after a crash
+        await until(lambda: len(pings) >= 3)         # keeps asking while MongoDB is down
+        assert consumer.state.paused and not consumer.resumed.is_set()
+        storage.up = True
+        await until(lambda: not consumer.state.paused)
+        assert consumer.resumed.is_set()
+        run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_duplicate_verdicts_keep_the_replica_paused_until_they_are_removed():
+    async def scenario():
+        storage = FakeStorage()
+        cleaned = [False]
+
+        async def prepare(now):
+            if not cleaned[0]:
+                raise DuplicateVerdicts("qa_violations has several verdicts for one downstream result and hop")
+
+        storage.prepare = prepare
+        consumer = await make_consumer(storage)
+        consumer.state.paused, consumer.state.prepared = True, False   # a new replica on an older database
+        consumer.resumed.clear()
+        metrics.CONSUMER_PAUSED.set(0)
+        await resume_now(consumer)
+        assert consumer.state.paused and not consumer.state.prepared
+        assert metrics.CONSUMER_PAUSED._value.get() == 1    # visible in Datadog, not only in the log
+        assert consumer._next_ping - asyncio.get_running_loop().time() > consumer_module.SETUP_RETRY_S - 1
+        cleaned[0] = True                                    # removed by hand, as the README shows
+        await resume_now(consumer)
+        assert not consumer.state.paused and consumer.state.prepared and consumer.resumed.is_set()
 
     asyncio.run(scenario())
 

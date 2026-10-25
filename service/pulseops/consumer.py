@@ -33,7 +33,7 @@ from .checks.quality import QualityCheck
 from .concurrency import gather_all
 from .config import Settings
 from .models import Heartbeat, Rejected, TestResult, parse
-from .storage import Storage
+from .storage import DuplicateVerdicts, Storage
 
 log = logging.getLogger(__name__)
 # Kafka reconnects: backoff between attempts.
@@ -42,6 +42,9 @@ MAX_BACKOFF_S = 30.0
 # seconds of each other (a failed ping itself takes up to 5 s), well inside the
 # INTEGRITY_TIMEOUT_SECONDS that the check timers wait.
 MAX_PING_BACKOFF_S = 2.0
+# When MongoDB answers but the setup can't finish (the data needs a cleanup by hand): retry slowly, as
+# each attempt scans qa_violations.
+SETUP_RETRY_S = 60.0
 # A partition whose worker has this many records waiting is paused in Kafka until half have been
 # processed, so a slow MongoDB doesn't make records pile up in memory. A fetch adds at most
 # MAX_PARTITION_FETCH_BYTES (about 200 messages) per partition on top.
@@ -101,6 +104,10 @@ class Consumer:
         self._ping_backoff = 1.0
 
     async def run(self) -> None:
+        # Every run starts paused, also a restart by the supervisor that shares a ServiceState left
+        # unpaused: the workers wait for self.resumed, which only a MongoDB answer sets, and the
+        # listener (it runs inside the Kafka start) pauses the partitions it is given.
+        self.state.paused = True
         await self._start_kafka()
         probe = asyncio.create_task(self._probe_kafka(), name="kafka probe")
         try:
@@ -337,6 +344,12 @@ class Consumer:
             if not self.state.prepared:
                 await self.storage.prepare(utcnow())
                 self.state.prepared = True
+        except DuplicateVerdicts as e:
+            # MongoDB answers, but its data needs a one-off cleanup: stay paused (and say so) until then.
+            log.error("%s; consumption stays paused, next attempt in %.0f s", e, SETUP_RETRY_S)
+            metrics.CONSUMER_PAUSED.set(1)
+            self._next_ping = loop.time() + SETUP_RETRY_S
+            return
         except PyMongoError as e:  # also e.g. ConfigurationError when a mongodb+srv:// lookup fails
             log.warning("MongoDB unavailable (%s), next check in %.0f s", e, self._ping_backoff)
             self.state.mongodb_ok = False

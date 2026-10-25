@@ -170,6 +170,24 @@ def test_a_verdict_lost_with_its_replica_is_judged_again_after_the_lease():
     assert store.pending == {}
 
 
+def test_a_timer_verdict_keeps_its_product_status_if_the_replica_fails_after_the_delete():
+    import pytest
+    from pymongo.errors import AutoReconnect
+
+    store = MemoryStore()
+    check = QualityCheck(store, LINE, GRACE_S)
+
+    async def scenario() -> None:
+        await check.on_result(result("machine-2", "P-1", "PASS", T0, "00000000-0000-4000-8000-000000000002"), T0)
+        store.fail_next_finish_pending = True   # the pending check is deleted, then MongoDB is lost (or SIGTERM)
+        with pytest.raises(AutoReconnect):
+            await check.expire_pending(T0 + timedelta(seconds=GRACE_S))
+
+    asyncio.run(scenario())
+    # Nothing is left for another replica to judge again, so the status must already be final.
+    assert store.pending == {} and store.statuses["P-1"] == NON_CONFORMING
+
+
 def test_one_verdict_per_hop_even_if_the_upstream_state_changes_before_a_redelivery():
     store = MemoryStore()
     check = QualityCheck(store, LINE, GRACE_S)

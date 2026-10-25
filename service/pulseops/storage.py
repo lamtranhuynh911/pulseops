@@ -21,6 +21,14 @@ MAX_RAW_CHARS = 10_000
 # verdict, another replica claims the check once the lease has run out.
 PENDING_LEASE = timedelta(seconds=30)
 _PENDING_FIELDS = {f.name for f in fields(PendingCheck)}
+# At most one verdict per downstream result and hop, whatever its type.
+_VERDICT_KEY = [("event_id", ASCENDING), ("upstream_machine_id", ASCENDING)]
+
+
+class DuplicateVerdicts(Exception):
+    """qa_violations holds several verdicts for one downstream result and hop, so its unique index can't
+    be built. Versions before that index stored one verdict per type. The extra ones are not deleted
+    automatically (they are someone's data); README "Upgrading a database" shows how to remove them."""
 
 
 class Storage:
@@ -53,8 +61,13 @@ class Storage:
         await db.test_results.create_index("timestamp")
         await db.qa_violations.create_index([("detected_at", DESCENDING)])
         await db.qa_violations.create_index("product_id")
-        # At most one verdict per downstream result and hop, whatever its type.
-        await db.qa_violations.create_index([("event_id", ASCENDING), ("upstream_machine_id", ASCENDING)], unique=True)
+        try:
+            await db.qa_violations.create_index(_VERDICT_KEY, unique=True)
+        except DuplicateKeyError as e:
+            raise DuplicateVerdicts(
+                "qa_violations has several verdicts for one downstream result and hop (written by an older "
+                'version), so its unique index can\'t be built: remove the extra ones, see README "Upgrading '
+                f'a database" ({e})') from e
         await db.pending_qa_checks.create_index("due_at")
         await db.pending_qa_checks.create_index([("product_id", ASCENDING), ("machine_id", ASCENDING)])
         await db.rejected_messages.create_index([("received_at", DESCENDING)])

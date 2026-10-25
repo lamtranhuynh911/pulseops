@@ -47,6 +47,7 @@ class MemoryStore:
         self.machine_statuses: dict[str, str] = {}
         self.machine_changed_at: dict[str, datetime] = {}
         self.fail_next_insert_violation = False
+        self.fail_next_finish_pending = False   # the delete is applied, then the call fails
 
     async def record_result(self, message: TestResult) -> dict[str, str]:
         latest = self.results.setdefault(message.product_id, {})
@@ -74,6 +75,9 @@ class MemoryStore:
     async def finish_pending(self, check: PendingCheck) -> None:
         self.pending.pop(check.event_id, None)
         self.leased.pop(check.event_id, None)
+        if self.fail_next_finish_pending:
+            self.fail_next_finish_pending = False
+            raise AutoReconnect("connection lost after the delete")
 
     async def insert_violation(self, violation: Violation) -> bool:
         if self.fail_next_insert_violation:

@@ -14,7 +14,7 @@ import pytest
 
 from conftest import LINE, load_scenario, result
 from pulseops.checks.quality import NON_CONFORMING, PASSED, QualityCheck
-from pulseops.storage import Storage
+from pulseops.storage import DuplicateVerdicts, Storage
 
 URI = os.environ.get("MONGODB_TEST_URI")
 pytestmark = pytest.mark.skipif(not URI, reason="MONGODB_TEST_URI not set")
@@ -130,3 +130,29 @@ async def test_qa_violations_scenario_end_to_end(storage):
     assert sum(s == PASSED for s in statuses.values()) == 48
     assert sum(s == NON_CONFORMING for s in statuses.values()) == 11
     assert len(statuses) == 63
+
+
+def test_prepare_refuses_duplicate_verdicts_left_by_an_older_version():
+    async def body():
+        storage = Storage(URI, f"pulseops_test_{uuid.uuid4().hex[:8]}", LINE)
+        hop = {"event_id": "00000000-0000-4000-8000-000000000002", "upstream_machine_id": "machine-1",
+               "product_id": "P-1", "machine_id": "machine-2", "upstream_machine_down": False}
+        try:
+            # What versions before the unique index could store: one verdict per type for the same hop.
+            await storage.db.qa_violations.insert_many([
+                {**hop, "_id": f"{hop['event_id']}:MISSING_UPSTREAM", "type": "MISSING_UPSTREAM", "detected_at": T0},
+                {**hop, "_id": f"{hop['event_id']}:FAILED_UPSTREAM", "type": "FAILED_UPSTREAM",
+                 "detected_at": T0 + timedelta(seconds=5)},
+            ])
+            with pytest.raises(DuplicateVerdicts):
+                await storage.prepare(T0)
+            assert await storage.db.qa_violations.count_documents({}) == 2   # nothing deleted automatically
+            await storage.db.qa_violations.delete_one({"type": "FAILED_UPSTREAM"})   # the cleanup by hand
+            await storage.prepare(T0)
+            indexes = await storage.db.qa_violations.index_information()
+            assert indexes["event_id_1_upstream_machine_id_1"].get("unique")
+        finally:
+            await storage.client.drop_database(storage.db.name)
+            await storage.close()
+
+    asyncio.run(body())
