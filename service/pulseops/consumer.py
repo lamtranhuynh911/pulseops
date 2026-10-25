@@ -26,7 +26,7 @@ from aiokafka import AIOKafkaConsumer, ConsumerRebalanceListener, TopicPartition
 from aiokafka.errors import CommitFailedError, KafkaError, NoOffsetForPartitionError, OffsetOutOfRangeError
 from pymongo.errors import ConnectionFailure, PyMongoError
 
-from . import metrics
+from . import metrics, specs
 from .checks.quality import QualityCheck
 from .config import Settings
 from .models import Heartbeat, Rejected, TestResult, parse
@@ -232,6 +232,9 @@ class Consumer:
         touch = self.storage.touch_machine(message.machine_id, now)  # any message is a sign of life
         if isinstance(message, Heartbeat):
             await touch
+            # Heartbeats have no event ID, so a heartbeat redelivered after a rebalance counts twice;
+            # rare, and harmless for a rate that only shows whether a machine is still talking.
+            metrics.HEARTBEATS.labels(message.machine_id).inc()
         else:
             # Independent writes run concurrently, to save round trips. Even for a duplicate the QA
             # check runs again: a crash between the insert and the check must not lose the check, and
@@ -244,6 +247,8 @@ class Consumer:
             metrics.TESTS.labels(message.machine_id, message.result).inc()
             for name, value in message.measurements.items():
                 metrics.MACHINE_MEASUREMENT.labels(message.machine_id, name).set(value)
+                if (spec_zone := specs.zone(message.machine_id, name, value)) is not None:
+                    metrics.MEASUREMENT_ZONE.labels(message.machine_id, name, spec_zone).inc()
         metrics.EVENT_LATENCY.observe(max(0.0, (now - message.timestamp).total_seconds()))
 
     async def _reject(self, record, rejected: Rejected, now: datetime) -> None:

@@ -6,17 +6,35 @@ pauses and retries the message once MongoDB answers again.
 """
 
 import asyncio
+import functools
+import time
 from dataclasses import asdict
 from datetime import datetime
 
 from pymongo import ASCENDING, DESCENDING, AsyncMongoClient, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from .checks.quality import PendingCheck, Violation, product_status
+from . import metrics
+from .checks.quality import FAILED, NON_CONFORMING, PASSED, PendingCheck, Violation, product_status
 from .models import TestResult
 
 # A message whose raw value is bigger than this is stored truncated in rejected_messages.
 MAX_RAW_CHARS = 10_000
+FINAL_STATUSES = (PASSED, FAILED, NON_CONFORMING)
+
+
+def timed(operation: str):
+    """Record the duration of a MongoDB operation, failed ones included, in pulseops_mongodb_operation_seconds."""
+    def decorator(method):
+        @functools.wraps(method)
+        async def wrapper(*args, **kwargs):
+            start = time.perf_counter()
+            try:
+                return await method(*args, **kwargs)
+            finally:
+                metrics.MONGODB_OPERATION.labels(operation).observe(time.perf_counter() - start)
+        return wrapper
+    return decorator
 
 
 class Storage:
@@ -55,6 +73,7 @@ class Storage:
 
     # --- messages -------------------------------------------------------------------------------
 
+    @timed("insert_test_result")
     async def insert_test_result(self, result: TestResult, received_at: datetime) -> bool:
         """Store the result; False if this event_id is already stored (a redelivery)."""
         document = result.model_dump(mode="python")
@@ -66,12 +85,14 @@ class Storage:
         except DuplicateKeyError:
             return False
 
+    @timed("touch_machine")
     async def touch_machine(self, machine_id: str, now: datetime) -> None:
         """Record a sign of life. $max: a late or redelivered message never moves last_seen_at back."""
         await self.db.machines.update_one(
             {"_id": machine_id}, {"$max": {"last_seen_at": now}, "$setOnInsert": {"tracked_since": now}}, upsert=True
         )
 
+    @timed("insert_rejected")
     async def insert_rejected(self, topic: str, partition: int, offset: int, reason: str, detail: str,
                               raw: bytes | None, received_at: datetime) -> bool:
         """Store a message that failed validation; False if it was already stored (a redelivery)."""
@@ -87,6 +108,7 @@ class Storage:
 
     # --- integrity check (MachineStore) ---------------------------------------------------------
 
+    @timed("machine_times")
     async def machine_times(self) -> tuple[dict[str, datetime | None], dict[str, datetime]]:
         last_seen, tracked_since = {}, {}
         async for doc in self.db.machines.find({"_id": {"$in": list(self.line)}}):
@@ -94,12 +116,14 @@ class Storage:
             tracked_since[doc["_id"]] = doc["tracked_since"]
         return last_seen, tracked_since
 
+    @timed("set_machine_status")
     async def set_machine_status(self, machine_id: str, status: str, now: datetime) -> bool:
         result = await self.db.machines.update_one(
             {"_id": machine_id, "status": {"$ne": status}}, {"$set": {"status": status, "status_changed_at": now}}
         )
         return result.modified_count == 1
 
+    @timed("machine_status")
     async def machine_status(self, machine_id: str) -> str | None:
         doc = await self.db.machines.find_one({"_id": machine_id}, {"status": 1})
         return doc.get("status") if doc else None
@@ -112,6 +136,7 @@ class Storage:
     # Every change to a product (results, pending checks, violations, status) increments rev, so
     # refresh_product_status can write the derived status with a compare-and-set on rev.
 
+    @timed("record_result")
     async def record_result(self, result: TestResult) -> dict[str, str]:
         field = f"results.{result.machine_id}"
         entry = {"result": result.result, "event_id": str(result.event_id), "timestamp": result.timestamp}
@@ -129,18 +154,22 @@ class Storage:
             doc = await self.db.products.find_one({"_id": result.product_id})
         return _latest(doc)
 
+    @timed("latest_results")
     async def latest_results(self, product_id: str) -> dict[str, str]:
         return _latest(await self.db.products.find_one({"_id": product_id}))
 
+    @timed("add_pending")
     async def add_pending(self, check: PendingCheck) -> None:
         await asyncio.gather(
             self.db.pending_qa_checks.update_one({"_id": check.event_id}, {"$setOnInsert": asdict(check)}, upsert=True),
             self._bump(check.product_id),
         )
 
+    @timed("claim_pending")
     async def claim_pending(self, product_id: str, machine_id: str) -> PendingCheck | None:
         return await self._claim({"product_id": product_id, "machine_id": machine_id})
 
+    @timed("claim_expired")
     async def claim_expired(self, now: datetime) -> PendingCheck | None:
         return await self._claim({"due_at": {"$lte": now}})
 
@@ -153,6 +182,7 @@ class Storage:
         await self._bump(check.product_id)
         return check
 
+    @timed("add_violation")
     async def add_violation(self, violation: Violation) -> bool:
         document = asdict(violation)
         document["_id"] = document.pop("id")
@@ -162,6 +192,7 @@ class Storage:
         await self._bump(violation.product_id)
         return True
 
+    @timed("refresh_product_status")
     async def refresh_product_status(self, product_id: str) -> str:
         while True:
             # Every write to a product, including this status write, increments rev, and whoever
@@ -182,8 +213,17 @@ class Storage:
                 {"_id": product_id, "rev": doc["rev"]}, {"$set": {"status": status}, "$inc": {"rev": 1}}
             )
             if written.modified_count == 1:
+                # Exactly one writer wins the compare-and-set, so each status change is counted once.
+                if status in FINAL_STATUSES:
+                    metrics.PRODUCT_STATUS_CHANGES.labels(status).inc()
+                if status == PASSED and (seconds := line_seconds(doc)) is not None:
+                    metrics.PRODUCT_LINE_TIME.observe(seconds)
                 return status
             # Another writer changed the product meanwhile: recompute from the new state.
+
+    @timed("count_pending")
+    async def count_pending(self) -> int:
+        return await self.db.pending_qa_checks.count_documents({})
 
     async def _bump(self, product_id: str) -> None:
         await self.db.products.update_one({"_id": product_id}, {"$inc": {"rev": 1}}, upsert=True)
@@ -201,6 +241,14 @@ class Storage:
             query["type"] = violation_type
         cursor = self.db.qa_violations.find(query).sort("detected_at", DESCENDING).limit(limit)
         return [doc async for doc in cursor]
+
+
+def line_seconds(doc: dict | None) -> float | None:
+    """Seconds from a product's first to its last machine result (machine timestamps), or None."""
+    times = [entry["timestamp"] for entry in (doc or {}).get("results", {}).values() if entry.get("timestamp")]
+    if len(times) < 2:
+        return None
+    return max(0.0, (max(times) - min(times)).total_seconds())
 
 
 def _latest(doc: dict | None) -> dict[str, str]:

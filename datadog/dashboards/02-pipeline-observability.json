@@ -1,0 +1,1078 @@
+{
+  "title": "PulseOps – Pipeline & Observability",
+  "description": "Ingestion latency, messages processed, pipeline errors (rejects, pauses, lag), service health, MongoDB and pipeline alerts.",
+  "layout_type": "ordered",
+  "reflow_type": "fixed",
+  "widgets": [
+    {
+      "definition": {
+        "type": "note",
+        "content": "**Pipeline & Observability** · Kafka → pulseops-service (2 replicas) → MongoDB. All widgets follow the time range at the top right. *No data* means the PulseOps cluster was not running: pick a range when it was (for example **Past 1 Day**). Widgets marked **ⓝ** use new metrics and show data once the new service version is deployed.",
+        "background_color": "blue",
+        "font_size": "14",
+        "text_align": "left",
+        "vertical_align": "top",
+        "show_tick": false,
+        "has_padding": true
+      },
+      "layout": {
+        "width": 12,
+        "height": 2,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "Avg processing latency",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "s",
+                "query": "sum:pulseops.event_latency_seconds.sum{*}.as_count()",
+                "aggregator": "sum"
+              },
+              {
+                "data_source": "metrics",
+                "name": "c",
+                "query": "sum:pulseops.event_latency_seconds.count{*}.as_count()",
+                "aggregator": "sum"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "s / c",
+                "number_format": {
+                  "unit": {
+                    "type": "custom_unit_label",
+                    "label": "s"
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 2
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 0,
+        "y": 2
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "Messages processed",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "c",
+                "query": "sum:pulseops.event_latency_seconds.count{*}.as_count()",
+                "aggregator": "sum"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "c"
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 0
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 2,
+        "y": 2
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "Rejected messages",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "r",
+                "query": "sum:pulseops.messages_rejected.count{*}.as_count()",
+                "aggregator": "sum"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "default_zero(r)",
+                "conditional_formats": [
+                  {
+                    "comparator": ">",
+                    "value": 0,
+                    "palette": "white_on_red"
+                  },
+                  {
+                    "comparator": "<=",
+                    "value": 0,
+                    "palette": "white_on_green"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 0
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 4,
+        "y": 2
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "Kafka lag (max)",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "l",
+                "query": "sum:kafka.consumer_lag{consumer_group:pulseops-service}",
+                "aggregator": "max"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "l",
+                "conditional_formats": [
+                  {
+                    "comparator": ">",
+                    "value": 500,
+                    "palette": "white_on_red"
+                  },
+                  {
+                    "comparator": "<=",
+                    "value": 500,
+                    "palette": "white_on_green"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 0
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 6,
+        "y": 2
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "Consumer paused",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "p",
+                "query": "max:pulseops.consumer_paused{*}",
+                "aggregator": "max"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "p",
+                "conditional_formats": [
+                  {
+                    "comparator": ">",
+                    "value": 0,
+                    "palette": "white_on_red"
+                  },
+                  {
+                    "comparator": "<=",
+                    "value": 0,
+                    "palette": "white_on_green"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 0
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 8,
+        "y": 2
+      }
+    },
+    {
+      "definition": {
+        "type": "query_value",
+        "title": "Service replicas available",
+        "title_size": "16",
+        "title_align": "left",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "metrics",
+                "name": "a",
+                "query": "max:kubernetes_state.deployment.replicas_available{kube_namespace:pulseops,kube_deployment:pulseops-service}",
+                "aggregator": "last"
+              }
+            ],
+            "formulas": [
+              {
+                "formula": "a",
+                "conditional_formats": [
+                  {
+                    "comparator": "<",
+                    "value": 2,
+                    "palette": "white_on_red"
+                  },
+                  {
+                    "comparator": ">=",
+                    "value": 2,
+                    "palette": "white_on_green"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 0
+      },
+      "layout": {
+        "width": 2,
+        "height": 2,
+        "x": 10,
+        "y": 2
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Ingestion & latency",
+        "layout_type": "ordered",
+        "background_color": "vivid_blue",
+        "show_title": true,
+        "widgets": [
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Event processing latency (s, avg)",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "s",
+                      "query": "sum:pulseops.event_latency_seconds.sum{*}.as_count()"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "c",
+                      "query": "sum:pulseops.event_latency_seconds.count{*}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "s / c",
+                      "alias": "latency_s"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ],
+              "markers": [
+                {
+                  "value": "y = 5",
+                  "display_type": "error dashed",
+                  "label": "5s"
+                }
+              ]
+            },
+            "layout": {
+              "width": 6,
+              "height": 3,
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Messages processed / min",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "c",
+                      "query": "sum:pulseops.event_latency_seconds.count{*}.as_count().rollup(sum, 60)"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "c",
+                      "alias": "messages"
+                    }
+                  ],
+                  "display_type": "bars",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 6,
+              "height": 3,
+              "x": 6,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Kafka consumer lag by topic",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "l",
+                      "query": "sum:kafka.consumer_lag{consumer_group:pulseops-service} by {topic}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "l"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ],
+              "markers": [
+                {
+                  "value": "y = 500",
+                  "display_type": "error dashed",
+                  "label": "monitor threshold 500"
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 0,
+              "y": 3
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Consumer pause by pod",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "p",
+                      "query": "max:pulseops.consumer_paused{*} by {pod_name}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "p"
+                    }
+                  ],
+                  "display_type": "bars",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 4,
+              "y": 3
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Rejected messages by reason",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "r",
+                      "query": "sum:pulseops.messages_rejected.count{*} by {topic,reason}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "r"
+                    }
+                  ],
+                  "display_type": "bars",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 8,
+              "y": 3
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "QA checks waiting for upstream ⓝ",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q",
+                      "query": "max:pulseops.pending_qa_checks{*}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q",
+                      "alias": "pending"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 6,
+              "height": 3,
+              "x": 0,
+              "y": 6
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Product line time (s, avg) ⓝ",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "s",
+                      "query": "sum:pulseops.product_line_seconds.sum{*}.as_count()"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "c",
+                      "query": "sum:pulseops.product_line_seconds.count{*}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "s / c",
+                      "alias": "line_seconds"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 6,
+              "height": 3,
+              "x": 6,
+              "y": 6
+            }
+          }
+        ]
+      },
+      "layout": {
+        "width": 12,
+        "height": 10,
+        "x": 0,
+        "y": 4
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Service & infrastructure health",
+        "layout_type": "ordered",
+        "background_color": "vivid_green",
+        "show_title": true,
+        "widgets": [
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "/health check by pod (1 = OK)",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "h",
+                      "query": "min:network.http.can_connect{kube_namespace:pulseops} by {pod_name}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "h"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Service replicas available",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "a",
+                      "query": "max:kubernetes_state.deployment.replicas_available{kube_namespace:pulseops,kube_deployment:pulseops-service}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "a"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 4,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Container restart (namespace pulseops)",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "r",
+                      "query": "max:kubernetes_state.container.restarts{kube_namespace:pulseops} by {kube_container_name}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "r"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 8,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "MongoDB ops/s",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "i",
+                      "query": "sum:mongodb.opcounters.insertps{*}"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "u",
+                      "query": "sum:mongodb.opcounters.updateps{*}"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "q",
+                      "query": "sum:mongodb.opcounters.queryps{*}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "i",
+                      "alias": "insert"
+                    },
+                    {
+                      "formula": "u",
+                      "alias": "update"
+                    },
+                    {
+                      "formula": "q",
+                      "alias": "query"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 6,
+              "height": 3,
+              "x": 0,
+              "y": 3
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "MongoDB connections",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "c",
+                      "query": "max:mongodb.connections.current{*}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "c",
+                      "alias": "connections"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 6,
+              "height": 3,
+              "x": 6,
+              "y": 3
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "MongoDB latency by operation (ms, avg) ⓝ",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "s",
+                      "query": "sum:pulseops.mongodb_operation_seconds.sum{*} by {operation}.as_count()"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "c",
+                      "query": "sum:pulseops.mongodb_operation_seconds.count{*} by {operation}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "1000 * s / c",
+                      "alias": "ms"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 8,
+              "height": 3,
+              "x": 0,
+              "y": 6
+            }
+          },
+          {
+            "definition": {
+              "type": "toplist",
+              "title": "Slowest MongoDB operations (ms) ⓝ",
+              "title_size": "16",
+              "title_align": "left",
+              "requests": [
+                {
+                  "response_format": "scalar",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "s",
+                      "query": "sum:pulseops.mongodb_operation_seconds.sum{*} by {operation}.as_count()",
+                      "aggregator": "sum"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "c",
+                      "query": "sum:pulseops.mongodb_operation_seconds.count{*} by {operation}.as_count()",
+                      "aggregator": "sum"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "1000 * s / c"
+                    }
+                  ]
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 8,
+              "y": 6
+            }
+          }
+        ]
+      },
+      "layout": {
+        "width": 12,
+        "height": 10,
+        "x": 0,
+        "y": 14
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Pipeline alerts",
+        "layout_type": "ordered",
+        "background_color": "vivid_orange",
+        "show_title": true,
+        "widgets": [
+          {
+            "definition": {
+              "type": "manage_status",
+              "title": "Pipeline monitors",
+              "title_size": "16",
+              "title_align": "left",
+              "display_format": "countsAndList",
+              "color_preference": "text",
+              "hide_zero_counts": true,
+              "query": "\"[PulseOps] Kafka\" OR \"[PulseOps] Consumption\" OR \"[PulseOps] Service\"",
+              "sort": "status,asc",
+              "summary_type": "monitors",
+              "show_last_triggered": true,
+              "show_priority": false
+            },
+            "layout": {
+              "width": 5,
+              "height": 4,
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "list_stream",
+              "title": "Pipeline alert history",
+              "title_size": "16",
+              "title_align": "left",
+              "requests": [
+                {
+                  "response_format": "event_list",
+                  "query": {
+                    "data_source": "event_stream",
+                    "query_string": "source:alert app:pulseops (\"Kafka consumer lag\" OR \"Consumption paused\" OR \"Service unhealthy\")",
+                    "event_size": "s"
+                  },
+                  "columns": [
+                    {
+                      "field": "timestamp",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "status_line",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "title",
+                      "width": "full"
+                    }
+                  ]
+                }
+              ]
+            },
+            "layout": {
+              "width": 7,
+              "height": 4,
+              "x": 5,
+              "y": 0
+            }
+          }
+        ]
+      },
+      "layout": {
+        "width": 12,
+        "height": 5,
+        "x": 0,
+        "y": 24
+      }
+    }
+  ]
+}

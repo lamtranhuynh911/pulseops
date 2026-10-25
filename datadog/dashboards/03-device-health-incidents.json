@@ -1,0 +1,913 @@
+{
+  "title": "PulseOps – Device Health & Incident Investigation",
+  "description": "Per-machine investigation: temperature and anomalies, measurements, pass rate, lost connections, QA violations and alert/recovery history.",
+  "layout_type": "ordered",
+  "reflow_type": "fixed",
+  "template_variables": [
+    {
+      "name": "machine",
+      "prefix": "machine",
+      "available_values": [],
+      "default": "*"
+    }
+  ],
+  "widgets": [
+    {
+      "definition": {
+        "type": "note",
+        "content": "**Device Health & Incident Investigation** · Pick a machine in the `machine` variable to narrow down. In *Temperature anomalies* the grey band is the normal range Datadog learns from history; red points are anomalies. All widgets follow the time range at the top right. *No data* means the PulseOps cluster was not running: pick a range when it was (for example **Past 1 Day**). Widgets marked **ⓝ** use new metrics and show data once the new service version is deployed.",
+        "background_color": "blue",
+        "font_size": "14",
+        "text_align": "left",
+        "vertical_align": "top",
+        "show_tick": false,
+        "has_padding": true
+      },
+      "layout": {
+        "width": 12,
+        "height": 2,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Temperature & machine status",
+        "layout_type": "ordered",
+        "background_color": "vivid_green",
+        "show_title": true,
+        "widgets": [
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Machine temperature (°C)",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "t",
+                      "query": "avg:pulseops.machine_measurement{$machine,name:temperature_c} by {machine}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "t"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ],
+              "yaxis": {
+                "include_zero": false
+              }
+            },
+            "layout": {
+              "width": 6,
+              "height": 3,
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Temperature anomalies",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "t",
+                      "query": "avg:pulseops.machine_measurement{$machine,name:temperature_c} by {machine}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "anomalies(t, 'basic', 2)"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ],
+              "yaxis": {
+                "include_zero": false
+              }
+            },
+            "layout": {
+              "width": 6,
+              "height": 3,
+              "x": 6,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "toplist",
+              "title": "Max temperature (°C)",
+              "title_size": "16",
+              "title_align": "left",
+              "requests": [
+                {
+                  "response_format": "scalar",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "t",
+                      "query": "max:pulseops.machine_measurement{$machine,name:temperature_c} by {machine}",
+                      "aggregator": "max"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "t"
+                    }
+                  ]
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 0,
+              "y": 3
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Seconds since last message",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "s",
+                      "query": "max:pulseops.machine_silence_seconds{$machine} by {machine}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "s"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ],
+              "markers": [
+                {
+                  "value": "y = 15",
+                  "display_type": "error dashed",
+                  "label": "timeout 15s → DOWN"
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 4,
+              "y": 3
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Status UP (1) / DOWN (0)",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "u",
+                      "query": "max:pulseops.machine_up{$machine} by {machine}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "u"
+                    }
+                  ],
+                  "display_type": "bars",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 8,
+              "y": 3
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Heartbeats / min ⓝ",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "h",
+                      "query": "sum:pulseops.heartbeats.count{$machine} by {machine}.as_count().rollup(sum, 60)"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "h"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ],
+              "markers": [
+                {
+                  "value": "y = 12",
+                  "display_type": "ok dashed",
+                  "label": "expected 12/min (5 s)"
+                }
+              ]
+            },
+            "layout": {
+              "width": 6,
+              "height": 3,
+              "x": 0,
+              "y": 6
+            }
+          },
+          {
+            "definition": {
+              "type": "toplist",
+              "title": "UP/DOWN status changes ⓝ",
+              "title_size": "16",
+              "title_align": "left",
+              "requests": [
+                {
+                  "response_format": "scalar",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "c",
+                      "query": "sum:pulseops.machine_status_changes.count{$machine} by {machine,status}.as_count()",
+                      "aggregator": "sum"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "c"
+                    }
+                  ]
+                }
+              ]
+            },
+            "layout": {
+              "width": 6,
+              "height": 3,
+              "x": 6,
+              "y": 6
+            }
+          }
+        ]
+      },
+      "layout": {
+        "width": 12,
+        "height": 10,
+        "x": 0,
+        "y": 2
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Production quality",
+        "layout_type": "ordered",
+        "background_color": "vivid_blue",
+        "show_title": true,
+        "widgets": [
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Pass rate by machine (%)",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "p",
+                      "query": "sum:pulseops.tests.count{$machine,result:pass} by {machine}.as_count().rollup(sum, 300)"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "t",
+                      "query": "sum:pulseops.tests.count{$machine} by {machine}.as_count().rollup(sum, 300)"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "100 * p / t",
+                      "alias": "pass_rate"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ],
+              "markers": [
+                {
+                  "value": "y = 90",
+                  "display_type": "error dashed",
+                  "label": "monitor threshold 90%"
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Cycle time (s)",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "c",
+                      "query": "avg:pulseops.machine_measurement{$machine,name:cycle_time_s} by {machine}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "c"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 4,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "toplist",
+              "title": "QA violations by type & machine",
+              "title_size": "16",
+              "title_align": "left",
+              "requests": [
+                {
+                  "response_format": "scalar",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "v",
+                      "query": "sum:pulseops.qa_violations.count{$machine} by {type,machine}.as_count()",
+                      "aggregator": "sum"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "v"
+                    }
+                  ]
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 8,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "machine-1 · length_mm (spec 119.85–120.15)",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "a",
+                      "query": "avg:pulseops.machine_measurement{machine:machine-1,name:length_mm}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "a"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ],
+              "markers": [
+                {
+                  "value": "119.85 < y < 120.15",
+                  "display_type": "ok dashed",
+                  "label": "spec"
+                }
+              ],
+              "yaxis": {
+                "include_zero": false
+              }
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 0,
+              "y": 3
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "machine-2 · leak_rate_ml_min (spec ≤ 0.50)",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "b",
+                      "query": "avg:pulseops.machine_measurement{machine:machine-2,name:leak_rate_ml_min}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "b"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ],
+              "markers": [
+                {
+                  "value": "y = 0.5",
+                  "display_type": "error dashed",
+                  "label": "spec max"
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 4,
+              "y": 3
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "machine-3 · output_voltage_v (spec 4.90–5.10)",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "c",
+                      "query": "avg:pulseops.machine_measurement{machine:machine-3,name:output_voltage_v}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "c"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ],
+              "markers": [
+                {
+                  "value": "4.9 < y < 5.1",
+                  "display_type": "ok dashed",
+                  "label": "spec"
+                }
+              ],
+              "yaxis": {
+                "include_zero": false
+              }
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 8,
+              "y": 3
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Measurements by spec zone (ok / marginal / out) ⓝ",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "z",
+                      "query": "sum:pulseops.measurement_zone.count{$machine} by {zone}.as_count().rollup(sum, 300)"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "z"
+                    }
+                  ],
+                  "display_type": "bars",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 0,
+              "y": 6
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Marginal rate by machine (%) ⓝ",
+              "title_size": "16",
+              "title_align": "left",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "legend_columns": [
+                "avg",
+                "min",
+                "max",
+                "value"
+              ],
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "m",
+                      "query": "sum:pulseops.measurement_zone.count{$machine,zone:marginal} by {machine}.as_count().rollup(sum, 300)"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "t",
+                      "query": "sum:pulseops.measurement_zone.count{$machine} by {machine}.as_count().rollup(sum, 300)"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "100 * default_zero(m) / t",
+                      "alias": "marginal_pct"
+                    }
+                  ],
+                  "display_type": "line",
+                  "style": {
+                    "palette": "dog_classic",
+                    "line_type": "solid",
+                    "line_width": "normal"
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 4,
+              "y": 6
+            }
+          },
+          {
+            "definition": {
+              "type": "toplist",
+              "title": "Out-of-spec measurements by machine ⓝ",
+              "title_size": "16",
+              "title_align": "left",
+              "requests": [
+                {
+                  "response_format": "scalar",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "o",
+                      "query": "sum:pulseops.measurement_zone.count{$machine,zone:out} by {machine,name}.as_count()",
+                      "aggregator": "sum"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "o"
+                    }
+                  ]
+                }
+              ]
+            },
+            "layout": {
+              "width": 4,
+              "height": 3,
+              "x": 8,
+              "y": 6
+            }
+          }
+        ]
+      },
+      "layout": {
+        "width": 12,
+        "height": 10,
+        "x": 0,
+        "y": 12
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Alert investigation by machine",
+        "layout_type": "ordered",
+        "background_color": "vivid_orange",
+        "show_title": true,
+        "widgets": [
+          {
+            "definition": {
+              "type": "query_table",
+              "title": "Alerts by machine & status",
+              "title_size": "16",
+              "title_align": "left",
+              "requests": [
+                {
+                  "response_format": "scalar",
+                  "queries": [
+                    {
+                      "data_source": "events",
+                      "name": "a",
+                      "search": {
+                        "query": "source:alert app:pulseops $machine"
+                      },
+                      "compute": {
+                        "aggregation": "count"
+                      },
+                      "group_by": [
+                        {
+                          "facet": "machine",
+                          "limit": 10,
+                          "sort": {
+                            "aggregation": "count",
+                            "order": "desc"
+                          }
+                        },
+                        {
+                          "facet": "status",
+                          "limit": 10,
+                          "sort": {
+                            "aggregation": "count",
+                            "order": "desc"
+                          }
+                        }
+                      ]
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "a",
+                      "alias": "events"
+                    }
+                  ]
+                }
+              ],
+              "has_search_bar": "auto"
+            },
+            "layout": {
+              "width": 4,
+              "height": 4,
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "list_stream",
+              "title": "Machine alert & recovery history",
+              "title_size": "16",
+              "title_align": "left",
+              "requests": [
+                {
+                  "response_format": "event_list",
+                  "query": {
+                    "data_source": "event_stream",
+                    "query_string": "source:alert app:pulseops $machine",
+                    "event_size": "s"
+                  },
+                  "columns": [
+                    {
+                      "field": "timestamp",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "status_line",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "title",
+                      "width": "full"
+                    }
+                  ]
+                }
+              ]
+            },
+            "layout": {
+              "width": 8,
+              "height": 4,
+              "x": 4,
+              "y": 0
+            }
+          }
+        ]
+      },
+      "layout": {
+        "width": 12,
+        "height": 5,
+        "x": 0,
+        "y": 22
+      }
+    }
+  ]
+}

@@ -27,7 +27,9 @@ spec:
                 "namespace": "pulseops",
                 "raw_metric_prefix": "pulseops_",
                 "metrics": ["tests", "qa_violations", "messages_rejected", "machine_up", "machine_silence_seconds",
-                            "machine_measurement", "consumer_paused", "event_latency_seconds"]
+                            "machine_measurement", "consumer_paused", "event_latency_seconds",
+                            "product_status_changes", "product_line_seconds", "measurement_zone", "heartbeats",
+                            "machine_status_changes", "pending_qa_checks", "mongodb_operation_seconds"]
               }]
             },
             "http_check": {
