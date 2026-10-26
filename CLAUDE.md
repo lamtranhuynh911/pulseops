@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-PulseOps is a proof of concept: machines 1–3 publish test results to Kafka, a Python service checks data integrity and production quality, stores everything in MongoDB, and exposes metrics that the Datadog Agent scrapes. Everything runs on a local Kubernetes cluster created with Kind. `README.md` is the design spec. Implemented: the service (`service/`), the simulator with its replay mode (`simulator/`), the Kustomize manifests (`k8s/`), and the replay Job (`k8s/replay/`). Datadog: Agent values in `datadog/values.yaml`, autodiscovery annotations on the pods, and the dashboard and monitors (`datadog/dashboard.json`, `datadog/monitors/*.json`), which `datadog/apply.sh` creates or updates through the Datadog API (idempotent, matched by title/name; edit the JSON, not the UI).
+PulseOps is a proof of concept: machines 1–3 publish test results to Kafka, a Python service checks data integrity and production quality, stores everything in MongoDB, and exposes metrics that the Datadog Agent scrapes. Everything runs on a local Kubernetes cluster created with Kind. `README.md` is the design spec. Implemented: the service (`service/`), the simulator with its replay mode (`simulator/`), the Kustomize manifests (`k8s/`), and the replay Job (`k8s/replay/`). Datadog: Agent values in `datadog/values.yaml` (plus `datadog/values-external-mongodb.yaml` for an external MongoDB), autodiscovery annotations on the pods, and the dashboard and monitors (`datadog/dashboard.json`, `datadog/monitors/*.json`), which `datadog/apply.sh` creates or updates through the Datadog API (idempotent, matched by title/name; edit the JSON, not the UI). The stack has been deployed on Kind from scratch by following the README, and every README demo scenario was checked; the owner's deployment uses the `external-mongodb` overlay.
+
+The README's "Deployment on Kind" is the owner's step-by-step deployment guide (steps 1–7, then updating, troubleshooting, teardown, external MongoDB). Its commands must run as written, in order, from the repo root, with `.env` loaded. When the deployment changes, update the affected step, the step 7 checks and the troubleshooting table.
 
 The owner is using this project to learn Kubernetes. When writing manifests, prefer plain Kustomize manifests over third-party charts or operators for our own components (the Datadog Agent's official Helm chart is the exception), and briefly explain the Kubernetes concepts and choices involved. When implementing, follow the README, and update it if the design changes.
 
@@ -22,13 +24,17 @@ docker run -d --rm --name pulseops-test-mongo -p 127.0.0.1:27018:27017 mongo:7.0
 cd service && MONGODB_TEST_URI=mongodb://127.0.0.1:27018 uv run pytest
 ```
 
-Cluster commands (once `k8s/` is written; full bring-up, including the Datadog Helm install, is in the README's "Deployment on Kind"):
+Cluster commands (the full bring-up, including the Datadog Helm install, is in the README's "Deployment on Kind"):
 
 ```bash
 kind create cluster --config k8s/kind-config.yaml        # cluster name: pulseops
 docker build -t pulseops-service:dev service && kind load docker-image pulseops-service:dev --name pulseops
 docker build -t pulseops-simulator:dev simulator && kind load docker-image pulseops-simulator:dev --name pulseops
 kubectl apply -k k8s/overlays/local                      # apply manifests; also re-applies k8s/base/simulator.env
+kubectl apply -k k8s/overlays/external-mongodb           # the same without the in-cluster MongoDB (owner's deployment)
+helm upgrade datadog-agent datadog/datadog -n datadog --version 3.261.0 \
+  -f datadog/values.yaml -f datadog/values-external-mongodb.yaml --set datadog.site="$DD_SITE"   # Agent values changed
+kubectl exec -n datadog ds/datadog-agent -c agent -- agent status   # check results (openmetrics, http_check, kafka_consumer, mongo)
 kubectl create -f k8s/replay/replay-job.yaml             # replay the scenario in the mock-data-replay ConfigMap (README)
 set -a; . ./.env; set +a; datadog/apply.sh               # create/update the Datadog dashboard and monitors
 kubectl rollout restart -n pulseops deployment/pulseops-service   # pick up a freshly loaded image

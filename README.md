@@ -222,7 +222,7 @@ Metrics are tagged by machine, never by product. Product-level detail lives in M
 
 ### Demo scenarios
 
-Faults are injected through the simulator settings in `k8s/base/simulator.env`. Apply a change with `kubectl apply -k k8s/overlays/local`: Kustomize turns the file into a new ConfigMap, and because the ConfigMap's name changes, Kubernetes rolls out a new simulator pod that uses it.
+Faults are injected through the simulator settings in `k8s/base/simulator.env`. Apply a change with `kubectl apply -k` and the overlay you deployed (`k8s/overlays/local` or `k8s/overlays/external-mongodb`): Kustomize turns the file into a new ConfigMap, and because the ConfigMap's name changes, Kubernetes rolls out a new simulator pod that uses it.
 
 | Scenario | Setting | What you should see |
 |---|---|---|
@@ -257,95 +257,213 @@ kubectl logs -n pulseops -l app.kubernetes.io/name=replay -f
 
 ## Deployment on Kind
 
+The whole stack runs on one local Kubernetes cluster created with [kind](https://kind.sigs.k8s.io/), which runs Kubernetes nodes as Docker containers. Follow the steps in order. Each step says what it creates. The full bring-up takes a few minutes; most of it is building the images the first time.
+
 ### Prerequisites
 
-Docker, [kind](https://kind.sigs.k8s.io/), `kubectl`, and `helm` (for example `brew install kind kubernetes-cli helm`), and [uv](https://docs.astral.sh/uv/) to run the tests. The stack needs about 4–5 GB of memory.
+- **Tools:** Docker, kind, `kubectl` and `helm` (for example `brew install kind kubernetes-cli helm`). You also need [uv](https://docs.astral.sh/uv/) to run the tests, and `mongosh` only to prepare an external MongoDB.
+- **Resources:** about 4–5 GB of free memory and 10 GB of disk. With Docker Desktop, give its VM at least 6–8 GB.
+- **A Datadog account:** an API key and an application key (*Organization Settings → API Keys / Application Keys*), and your Datadog site, for example `datadoghq.com` or `datadoghq.eu`.
+- **On Linux, raise the inotify limits** first, or pods can fail with "too many open files" ([kind known issue](https://kind.sigs.k8s.io/docs/user/known-issues/#pod-errors-due-to-too-many-open-files)):
 
-On Linux, raise the inotify limits first, or pods can fail with "too many open files" ([kind known issue](https://kind.sigs.k8s.io/docs/user/known-issues/#pod-errors-due-to-too-many-open-files)):
+  ```bash
+  printf 'fs.inotify.max_user_watches=524288\nfs.inotify.max_user_instances=512\n' | sudo tee /etc/sysctl.d/99-kind.conf
+  sudo sysctl --system
+  ```
+
+### Step 1: Configure `.env`
 
 ```bash
-printf 'fs.inotify.max_user_watches=524288\nfs.inotify.max_user_instances=512\n' | sudo tee /etc/sysctl.d/99-kind.conf
-sudo sysctl --system
+cp .env.example .env
 ```
 
-### Bring the stack up
+Fill in `.env`. It is git-ignored, so credentials stay out of Git; `.env.example` is committed, so leave its values empty.
+
+| Variable | Needed | Purpose |
+|---|---|---|
+| `DD_API_KEY` | Yes | The Agent's API key. Stored in the cluster as the `datadog-secret` Secret. |
+| `DD_SITE` | Yes | Your Datadog site, for example `datadoghq.com`. |
+| `DD_APP_KEY` | Yes | Used only by `datadog/apply.sh` on your machine to create the dashboard and monitors. Never stored in the cluster. |
+| `DD_NOTIFY` | No | A handle such as `@you@example.com`, appended to every monitor message. |
+| `MONGODB_URI` | Yes | Keep `mongodb://mongodb:27017` for the in-cluster MongoDB, or set the connection string of an external one (see [Using an external MongoDB](#using-an-external-mongodb)). |
+| `DD_MONGODB_PASSWORD` | External MongoDB only | Password of the read-only `datadog` MongoDB user that the Datadog check logs in as. |
+
+Wrap a value in single quotes if it contains `$`, quotes, backslashes or spaces. Then load the file into your shell; every later step reads these variables, so repeat this in each new terminal:
 
 ```bash
-cp .env.example .env                       # fill in DD_API_KEY, DD_APP_KEY and DD_SITE; keep MONGODB_URI for in-cluster MongoDB
 set -a; . ./.env; set +a
-kind create cluster --config k8s/kind-config.yaml
+```
 
-# Build the images and copy them into the cluster's node (Kind cannot see your local images)
+### Step 2: Create the cluster
+
+```bash
+kind create cluster --config k8s/kind-config.yaml
+kubectl get nodes                          # pulseops-control-plane   Ready
+```
+
+This starts one Docker container, `pulseops-control-plane`, that is both the control plane and the node your pods run on, and points `kubectl` at it (context `kind-pulseops`).
+
+### Step 3: Build and load the images
+
+```bash
 docker build -t pulseops-service:dev service
 docker build -t pulseops-simulator:dev simulator
 kind load docker-image pulseops-service:dev pulseops-simulator:dev --name pulseops
-# If that fails with "content digest ... not found" (Docker's containerd image store), load an archive:
-#   docker save -o /tmp/images.tar pulseops-service:dev pulseops-simulator:dev
-#   kind load image-archive /tmp/images.tar --name pulseops
+```
 
-# Datadog Agent
+The Kind node has its own container runtime and can't see the images on your machine, so they are copied into it. They are tagged `:dev`, not `:latest`, so Kubernetes uses the loaded image instead of trying to pull it from a registry. If `kind load` fails with "content digest ... not found" (Docker's containerd image store), load an archive instead:
+
+```bash
+docker save -o /tmp/images.tar pulseops-service:dev pulseops-simulator:dev
+kind load image-archive /tmp/images.tar --name pulseops
+```
+
+### Step 4: Install the Datadog Agent
+
+```bash
 kubectl create namespace datadog
 kubectl create secret generic datadog-secret -n datadog --from-literal api-key="$DD_API_KEY"
 helm repo add datadog https://helm.datadoghq.com
-helm install datadog-agent datadog/datadog -n datadog --version 3.261.0 -f datadog/values.yaml --set datadog.site="$DD_SITE"
-
-# PulseOps: Kafka, MongoDB, service, simulator
-kubectl apply -f k8s/base/namespace.yaml  # the namespace first (the Secret goes into it), with apply, as apply -k manages it later
-kubectl create secret generic pulseops-mongodb -n pulseops --from-literal uri="$MONGODB_URI"
-kubectl apply -k k8s/overlays/local        # with an external MONGODB_URI: k8s/overlays/external-mongodb
-kubectl get pods -n pulseops -w            # wait until everything is Running and Ready
-
-# Datadog dashboard and monitors (uses DD_API_KEY, DD_APP_KEY, DD_SITE; safe to re-run after editing the JSON)
-datadog/apply.sh
-
-# Reach the API from your machine
-kubectl port-forward -n pulseops svc/pulseops-service 8000:8000   # then open http://localhost:8000/docs
+helm repo update
+helm install datadog-agent datadog/datadog -n datadog --version 3.261.0 \
+  -f datadog/values.yaml --set datadog.site="$DD_SITE"
 ```
 
-If `MONGODB_URI` already points to an external MongoDB, apply `k8s/overlays/external-mongodb` instead of `local` (no in-cluster MongoDB is created), and set up its Datadog check as described in step 3 of [Using an external MongoDB](#using-an-external-mongodb).
+The chart installs the Agent as a DaemonSet (one Agent pod per node), a Cluster Agent and kube-state-metrics. The API key goes into a Secret created with `kubectl`, so it is never in a file in Git.
 
-After changing the service code, rebuild the image, load it again with `kind load docker-image`, and run `kubectl rollout restart -n pulseops deployment/pulseops-service`. Tear everything down with `kind delete cluster --name pulseops`; this also deletes the in-cluster MongoDB and Kafka data.
+**With an external MongoDB**, create its read-only `datadog` user first ([see below](#create-the-read-only-datadog-user)). Then give the Agent the host and that password through the `datadog-mongodb` Secret, and add the second values file:
+
+```bash
+kubectl create secret generic datadog-mongodb -n datadog \
+  --from-literal host="$(printf '%s' "$MONGODB_URI" | sed -E 's#^mongodb(\+srv)?://([^@/]*@)?([^/?]*).*#\3#')" \
+  --from-literal password="$DD_MONGODB_PASSWORD"
+helm install datadog-agent datadog/datadog -n datadog --version 3.261.0 \
+  -f datadog/values.yaml -f datadog/values-external-mongodb.yaml --set datadog.site="$DD_SITE"
+```
+
+If the Agent is already installed, run the same command with `helm upgrade` instead of `helm install`.
+
+### Step 5: Deploy PulseOps
+
+```bash
+kubectl apply -f k8s/base/namespace.yaml   # the namespace first: the Secret goes into it
+kubectl create secret generic pulseops-mongodb -n pulseops --from-literal uri="$MONGODB_URI"
+kubectl apply -k k8s/overlays/local        # with an external MongoDB: k8s/overlays/external-mongodb
+
+kubectl rollout status -n pulseops statefulset/kafka --timeout=300s
+kubectl rollout status -n pulseops statefulset/mongodb --timeout=300s     # local overlay only
+kubectl wait -n pulseops --for=condition=complete job/kafka-topics --timeout=300s
+kubectl rollout status -n pulseops deployment/pulseops-service --timeout=300s
+kubectl rollout status -n pulseops deployment/simulator --timeout=300s
+```
+
+`kubectl apply -k` builds the manifests with Kustomize: the `local` overlay is the base (Kafka, the topic Job, the service and the simulator) plus an in-cluster MongoDB, and `external-mongodb` is the base alone. The [Kubernetes resources](#kubernetes-resources) table lists what it creates. The namespace is created with `apply`, not `kubectl create namespace`, because `apply -k` manages it afterwards. The MongoDB connection string is a Secret created with `kubectl`, because an external URI contains credentials.
+
+The service pods stay not ready (`0/1`) until Kafka and MongoDB answer, usually for less than a minute. That is the readiness probe on `/health` at work; the pods are not restarted.
+
+### Step 6: Create the Datadog dashboard and monitors
+
+```bash
+datadog/apply.sh
+```
+
+This creates the *PulseOps* dashboard and the six monitors from `datadog/dashboard.json` and `datadog/monitors/*.json` through the Datadog API, using `DD_API_KEY`, `DD_APP_KEY` and `DD_SITE`. It finds existing objects by title or name and updates them, so it is safe to run again; change them by editing the JSON, not the Datadog UI.
+
+### Step 7: Check the deployment
+
+```bash
+kubectl get pods -n pulseops
+```
+
+`kafka-0`, both `pulseops-service` pods, `simulator` (and `mongodb-0` with the `local` overlay) are `Running` and `1/1` ready, and `kafka-topics` is `Completed`. Then open the API on your machine; the port-forward keeps running, so use a second terminal for the rest:
+
+```bash
+kubectl port-forward -n pulseops svc/pulseops-service 8000:8000
+```
+
+```bash
+curl -s localhost:8000/health     # {"status":"ok","kafka_consumer":"running","mongodb":"ok","paused":false}
+curl -s localhost:8000/machines   # machine-1, machine-2 and machine-3, each with "status": "UP"
+kubectl exec -n pulseops kafka-0 -- /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 --describe --group pulseops-service   # LAG near 0 ("-" for an empty partition), split over both pods
+kubectl exec -n datadog ds/datadog-agent -c agent -- agent status       # see below
+```
+
+In the `agent status` output, the `openmetrics` and `http_check` checks each have one `[OK]` instance per service pod, and `kafka_consumer` and `mongo` are `[OK]`. In Datadog, the *PulseOps* dashboard fills within a few minutes and every monitor is *OK*. The interactive API documentation is at <http://localhost:8000/docs>.
+
+### Updating the stack
+
+| What changed | What to run |
+|---|---|
+| Service or simulator code | Rebuild the image and `kind load` it again (step 3), then `kubectl rollout restart -n pulseops deployment/pulseops-service` (or `deployment/simulator`). |
+| Manifests or `k8s/base/simulator.env` | `kubectl apply -k` with your overlay. A changed `simulator.env` gives the ConfigMap a new name, so a new simulator pod starts. |
+| Agent values | The `helm upgrade` form of the step 4 command, with the same values files. |
+| Dashboard or monitors | Edit the JSON and run `datadog/apply.sh` again. |
+
+### Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `kind load` fails with "content digest ... not found" | Docker's containerd image store. Load an archive instead (step 3). |
+| Pods fail with "too many open files" | The inotify limits are too low. Raise them (see [Prerequisites](#prerequisites)). |
+| `ErrImagePull` or `ImagePullBackOff` on the service or simulator | The image isn't in the Kind node. Run `kind load` again (step 3), and keep the `:dev` tag. |
+| `CreateContainerConfigError` on the service | The `pulseops-mongodb` Secret is missing. Create it (step 5). |
+| Service pods `Running` but `0/1` ready for minutes | `/health` is `503`. Its body (`curl` through the port-forward) and `kubectl logs -n pulseops deployment/pulseops-service` say whether Kafka or MongoDB is unreachable. With an external MongoDB, check `MONGODB_URI` and that the Kind node can reach the server. |
+| `mongodb-0` in `CrashLoopBackOff`, log mentions "Linux kernel versions 6.19 and newer" | MongoDB 8 on a new kernel ([SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912)). Keep the 7.0 tag pinned in `k8s/overlays/local/kustomization.yaml`. |
+| `agent status` shows the `mongo` check with `Authentication failed` | The `datadog` user is missing, was created in a database other than `admin`, or its password differs from `DD_MONGODB_PASSWORD`. See [Create the read-only datadog user](#create-the-read-only-datadog-user). |
+| Nothing arrives in Datadog | The API key or `DD_SITE` is wrong. `agent status` shows the site it uses (`config_site`) and, under the endpoints, the last characters of the API key; *API Keys status* says whether Datadog accepts it. |
+| Service log: `qa_violations has several verdicts for one downstream result and hop` | The database was written by an earlier version. See [Upgrading a database written by an earlier version](#upgrading-a-database-written-by-an-earlier-version). |
+
+### Tearing down
+
+```bash
+kind delete cluster --name pulseops
+```
+
+This deletes everything in the cluster, including the in-cluster MongoDB's and Kafka's data. An external MongoDB and the Datadog dashboard and monitors are not touched: `apply.sh` reuses them after the next bring-up, and you can delete them in the Datadog UI if you no longer need them.
 
 ### Using an external MongoDB
 
-The service reads its connection string from the `uri` key of the `pulseops-mongodb` Secret, and its database name from `MONGODB_DATABASE` (default `pulseops`). Nothing else in the service knows where MongoDB runs. To use an external instance (for example MongoDB Atlas, or a MongoDB on another server):
+The service reads its connection string from the `uri` key of the `pulseops-mongodb` Secret, and its database name from `MONGODB_DATABASE` (default `pulseops`). Nothing else in the service knows where MongoDB runs, so an external instance (MongoDB Atlas, or a MongoDB on another server) only needs a different `MONGODB_URI` and the `external-mongodb` overlay, which leaves out the in-cluster MongoDB.
 
-1. Set `MONGODB_URI` in `.env` to the external connection string, and recreate the Secret:
+Requirements for the external instance:
+
+- **Reachable from the Kind node.** Pods can reach the internet through Docker. A MongoDB running on your own machine is not at `localhost` (inside a pod that is the pod itself); use the Docker bridge gateway address, usually `172.18.0.1` for Kind's network.
+- **A user with `readWrite` on the database** for the service, in `MONGODB_URI`. The service creates its own collections and indexes, so the database can start empty.
+- **A separate read-only user for the Datadog check,** whose password comes from a Kubernetes Secret, not from the values file.
+
+An annotation can only describe a pod in the cluster, so for an external MongoDB the Datadog `mongo` check is configured in the Agent's Helm values instead (`datadog/values-external-mongodb.yaml`). The Agent reads the host and password from the `datadog-mongodb` Secret, the only Secret it is allowed to read.
+
+#### Create the read-only datadog user
+
+Create it once, in the `admin` database, with an admin login. `passwordPrompt()` asks for the new user's password: choose a strong one (for example from `openssl rand -hex 16`), and put the same value in `.env` as `DD_MONGODB_PASSWORD=<the password>`. The check needs all four roles; with only `read` on `pulseops` it can't run `serverStatus`, for example.
+
+```bash
+mongosh "mongodb://<admin-user>@<host>:<port>/admin" --eval '
+db.getSiblingDB("admin").createUser({user: "datadog", pwd: passwordPrompt(), roles: [
+  {role: "read", db: "admin"}, {role: "clusterMonitor", db: "admin"},
+  {role: "read", db: "local"}, {role: "read", db: "pulseops"}]})'
+```
+
+The Agent reads the `datadog-mongodb` Secret when it starts. If you change the password later, recreate the Secret and restart the Agent with `kubectl rollout restart -n datadog daemonset/datadog-agent`.
+
+#### Switching a running deployment to an external MongoDB
+
+1. Set `MONGODB_URI` in `.env`, load `.env` again, and replace the Secret:
    ```bash
    kubectl create secret generic pulseops-mongodb -n pulseops --from-literal uri="$MONGODB_URI" \
      --dry-run=client -o yaml | kubectl apply -f -
    ```
-2. Deploy the `external-mongodb` overlay, which leaves out the in-cluster MongoDB, remove the in-cluster MongoDB if it is running, and restart the service so it reads the new Secret:
+2. Apply the `external-mongodb` overlay, remove the in-cluster MongoDB, and restart the service so it reads the new Secret:
    ```bash
    kubectl apply -k k8s/overlays/external-mongodb
    kubectl delete -n pulseops statefulset/mongodb service/mongodb --ignore-not-found
    kubectl rollout restart -n pulseops deployment/pulseops-service
    ```
    `kubectl apply` only creates and updates resources, so the StatefulSet has to be deleted explicitly. Its PersistentVolumeClaim (the data) is kept until you delete it too.
-3. Point the Datadog MongoDB check at the external instance. An annotation can only describe a pod in the cluster, so for an external MongoDB the check is configured in the Agent's Helm values instead. It logs in as a read-only `datadog` user. Create that user once, in the `admin` database, with an admin login. `passwordPrompt()` asks for the new user's password: choose a strong one (for example from `openssl rand -hex 16`), and put the same value in `.env` as `DD_MONGODB_PASSWORD=<the password>` (`.env` is git-ignored; `.env.example` is committed). The check needs all four roles below; with only `read` on `pulseops` it can't run `serverStatus`, for example:
-   ```bash
-   mongosh "mongodb://<admin-user>@<host>:<port>/admin" --eval '
-   db.getSiblingDB("admin").createUser({user: "datadog", pwd: passwordPrompt(), roles: [
-     {role: "read", db: "admin"}, {role: "clusterMonitor", db: "admin"},
-     {role: "read", db: "local"}, {role: "read", db: "pulseops"}]})'
-   ```
-   The Agent reads the host and that password from the Secret `datadog-mongodb`, the only Secret it is allowed to read, so neither is in Git:
-   ```bash
-   kubectl create secret generic datadog-mongodb -n datadog \
-     --from-literal host="$(printf '%s' "$MONGODB_URI" | sed -E 's#^mongodb(\+srv)?://([^@/]*@)?([^/?]*).*#\3#')" \
-     --from-literal password="$DD_MONGODB_PASSWORD" --dry-run=client -o yaml | kubectl apply -f -
-   helm upgrade datadog-agent datadog/datadog -n datadog --version 3.261.0 \
-     -f datadog/values.yaml -f datadog/values-external-mongodb.yaml --set datadog.site="$DD_SITE"
-   ```
-   The Agent reads the Secret when it starts. If you change the password later, recreate the Secret and restart the Agent with `kubectl rollout restart -n datadog daemonset/datadog-agent`. To check the result, run `kubectl exec -n datadog ds/datadog-agent -c agent -- agent status` and find the `mongo` check; `Authentication failed` there means the user or its password doesn't match.
+3. Create the [read-only datadog user](#create-the-read-only-datadog-user), then the `datadog-mongodb` Secret and the `helm upgrade` from step 4 (add `--dry-run=client -o yaml | kubectl apply -f -` to the Secret command if it already exists).
 
-Requirements for the external instance:
-
-- **Reachable from the Kind node.** Pods can reach the internet through Docker. A MongoDB running on your own machine is not at `localhost` (inside a pod that is the pod itself); use the Docker bridge gateway address, usually `172.18.0.1` for Kind's network.
-- **A user with `readWrite` on the database.** The service creates its own collections and indexes, so the database can start empty.
-- **A separate read-only user for the Datadog check,** whose password comes from a Kubernetes Secret, not from the values file.
-
-To switch back, set `MONGODB_URI` to `mongodb://mongodb:27017`, recreate the Secret, apply `k8s/overlays/local`, and upgrade the Agent with `datadog/values.yaml` only.
+To switch back, set `MONGODB_URI` to `mongodb://mongodb:27017`, replace the Secret, apply `k8s/overlays/local`, restart the service, and upgrade the Agent with `datadog/values.yaml` only.
 
 ### Upgrading a database written by an earlier version
 
@@ -384,8 +502,6 @@ Some of these choices are deliberate:
 - **Kind needs `datadog.kubelet.tlsVerify: false`** in `datadog/values.yaml`, because Kind's kubelet uses a self-signed certificate. The values also set `datadog.clusterName` (Kind's can't be detected) and turn off the Datadog Operator, which recent charts install by default; this chart manages the Agent itself.
 
 ## Repository layout
-
-Planned structure:
 
 ```
 pulseops/
