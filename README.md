@@ -349,11 +349,11 @@ To switch back, set `MONGODB_URI` to `mongodb://mongodb:27017`, recreate the Sec
 
 ### Upgrading a database written by an earlier version
 
-The service allows at most one QA verdict per downstream result and hop, enforced by a unique index on `qa_violations` (`event_id`, `upstream_machine_id`). Earlier versions stored one verdict per violation type, so a database they wrote can hold two verdicts for one hop, and then the index can't be built. The service doesn't delete them itself. Instead it logs `qa_violations has several verdicts for one downstream result and hop`, stays paused (`/health` returns `503`, `pulseops.consumer_paused` is `1`), and tries again every minute. To keep the first verdict stored for each hop and delete the others:
+The service allows at most one QA verdict per downstream result and hop, enforced by a unique index on `qa_violations` (`event_id`, `upstream_machine_id`). Earlier versions stored one verdict per violation type, so a database they wrote can hold two verdicts for one hop, and then the index can't be built. The service doesn't delete them itself. Instead it logs `qa_violations has several verdicts for one downstream result and hop`, stays paused (`/health` returns `503`, `pulseops.consumer_paused` is `1`), and tries again every minute. Finish the rollout first (or scale the old version to 0): a pod still running an earlier version can store new duplicates. Then keep the first verdict stored for each hop and delete the others (`MONGODB_DATABASE` defaults to `pulseops`, as in the service):
 
 ```bash
 mongosh "$MONGODB_URI" --eval '
-const verdicts = db.getSiblingDB("pulseops").qa_violations;
+const verdicts = db.getSiblingDB(process.env.MONGODB_DATABASE || "pulseops").qa_violations;
 verdicts.aggregate([
   {$sort: {detected_at: 1, _id: 1}},
   {$group: {_id: {e: "$event_id", u: "$upstream_machine_id"}, ids: {$push: "$_id"}}},
@@ -361,7 +361,7 @@ verdicts.aggregate([
 ]).forEach(hop => verdicts.deleteMany({_id: {$in: hop.ids.slice(1)}}))'
 ```
 
-The service resumes on its own within a minute.
+The service resumes on its own within a minute. If the log line comes back, an old pod stored another duplicate: run the cleanup again.
 
 ### Kubernetes resources
 
