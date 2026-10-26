@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from pymongo.errors import ConnectionFailure, PyMongoError
+from pymongo.errors import PyMongoError
 
 from . import metrics
 from .api import router
@@ -47,11 +47,7 @@ async def lifespan(app: FastAPI):
         storage, settings.line_sequence, settings.qa_grace_s,
         on_violation=lambda v: metrics.QA_VIOLATIONS.labels(v.machine_id, v.type).inc(),
     )
-    integrity = IntegrityCheck(
-        storage, settings.integrity_timeout_s,
-        on_change=lambda m: metrics.MACHINE_STATUS_CHANGES.labels(m.machine_id, m.status).inc(),
-    )
-    consumer = Consumer(settings, storage, quality, state)
+    integrity = IntegrityCheck(storage, settings.integrity_timeout_s)
     app.state.service = state
     app.state.storage = storage
 
@@ -77,18 +73,28 @@ async def lifespan(app: FastAPI):
         try:
             await storage.ping()
             state.mongodb_ok = True
-        except ConnectionFailure:
+        except PyMongoError:
             state.mongodb_ok = False
+
+    async def consumer() -> None:
+        # The consumer handles Kafka and MongoDB outages itself. If it fails anyway (a bug), restart it
+        # rather than leave a pod that is alive but consumes nothing: the TCP liveness probe would never
+        # notice.
+        while True:
+            try:
+                await Consumer(settings, storage, quality, state).run()
+            except Exception:
+                log.exception("Kafka consumer failed; restarting it in 5 s")
+                await asyncio.sleep(5)
 
     # Started in the background, not awaited: the port must open right away for the TCP liveness
     # probe, even while Kafka or MongoDB is still unreachable.
     tasks = [
-        asyncio.create_task(consumer.run(), name="consumer"),
+        asyncio.create_task(consumer(), name="consumer"),
         asyncio.create_task(every(settings.integrity_interval_s, integrity_check)),
         asyncio.create_task(every(settings.qa_interval_s, qa_check)),
         asyncio.create_task(every(HEALTH_INTERVAL_S, mongodb_health)),
     ]
-    tasks[0].add_done_callback(_log_consumer_exit)
     yield
     for task in tasks:
         task.cancel()
@@ -96,15 +102,10 @@ async def lifespan(app: FastAPI):
     await storage.close()
 
 
-def _log_consumer_exit(task: asyncio.Task) -> None:
-    if not task.cancelled() and task.exception():
-        log.error("Kafka consumer stopped", exc_info=task.exception())
-
-
 app = FastAPI(title="PulseOps", lifespan=lifespan)
 app.include_router(router)
 
 
-@app.exception_handler(ConnectionFailure)
-async def mongodb_unavailable(request: Request, exc: ConnectionFailure) -> JSONResponse:
+@app.exception_handler(PyMongoError)
+async def mongodb_unavailable(request: Request, exc: PyMongoError) -> JSONResponse:
     return JSONResponse({"detail": "MongoDB is unavailable"}, status_code=503)

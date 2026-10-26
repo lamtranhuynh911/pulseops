@@ -4,8 +4,11 @@ import csv
 from datetime import datetime
 from pathlib import Path
 
+from pymongo.errors import AutoReconnect
+
 from pulseops.checks.quality import PendingCheck, Violation, product_status
 from pulseops.models import TestResult
+from pulseops.storage import PENDING_LEASE
 
 MOCK_DATA = Path(__file__).resolve().parents[2] / "mock-data"
 LINE = ("machine-1", "machine-2", "machine-3")
@@ -38,9 +41,13 @@ class MemoryStore:
         self.line = line
         self.results: dict[str, dict[str, tuple[str, datetime]]] = {}
         self.pending: dict[str, PendingCheck] = {}
-        self.violations: dict[str, Violation] = {}
+        self.leased: dict[str, datetime] = {}          # event_id -> lease end
+        self.violations: dict[tuple[str, str], Violation] = {}  # (event_id, upstream machine) -> verdict
         self.statuses: dict[str, str] = {}
         self.machine_statuses: dict[str, str] = {}
+        self.machine_changed_at: dict[str, datetime] = {}
+        self.fail_next_insert_violation = False
+        self.fail_next_finish_pending = False   # the delete is applied, then the call fails
 
     async def record_result(self, message: TestResult) -> dict[str, str]:
         latest = self.results.setdefault(message.product_id, {})
@@ -55,26 +62,38 @@ class MemoryStore:
     async def add_pending(self, check: PendingCheck) -> None:
         self.pending.setdefault(check.event_id, check)
 
-    async def claim_pending(self, product_id: str, machine_id: str) -> PendingCheck | None:
-        for event_id, check in self.pending.items():
-            if check.product_id == product_id and check.machine_id == machine_id:
-                return self.pending.pop(event_id)
-        return None
+    async def pending_checks(self, product_id: str, machine_id: str) -> list[PendingCheck]:
+        return [c for c in self.pending.values() if c.product_id == product_id and c.machine_id == machine_id]
 
     async def claim_expired(self, now: datetime) -> PendingCheck | None:
         for event_id, check in self.pending.items():
-            if check.due_at <= now:
-                return self.pending.pop(event_id)
+            if check.due_at <= now and self.leased.get(event_id, now) <= now:
+                self.leased[event_id] = now + PENDING_LEASE
+                return check
         return None
 
-    async def add_violation(self, violation: Violation) -> bool:
-        if violation.id in self.violations:
+    async def finish_pending(self, check: PendingCheck) -> None:
+        self.pending.pop(check.event_id, None)
+        self.leased.pop(check.event_id, None)
+        if self.fail_next_finish_pending:
+            self.fail_next_finish_pending = False
+            raise AutoReconnect("connection lost after the delete")
+
+    async def insert_violation(self, violation: Violation) -> bool:
+        if self.fail_next_insert_violation:
+            self.fail_next_insert_violation = False
+            raise AutoReconnect("connection lost")
+        key = (violation.event_id, violation.upstream_machine_id)
+        if key in self.violations:
             return False
-        self.violations[violation.id] = violation
+        self.violations[key] = violation
         return True
 
-    async def machine_status(self, machine_id: str) -> str | None:
-        return self.machine_statuses.get(machine_id)
+    async def touch_product(self, product_id: str) -> None:
+        pass
+
+    async def machine_state(self, machine_id: str) -> tuple[str | None, datetime | None]:
+        return self.machine_statuses.get(machine_id), self.machine_changed_at.get(machine_id)
 
     async def refresh_product_status(self, product_id: str) -> str:
         status = product_status(

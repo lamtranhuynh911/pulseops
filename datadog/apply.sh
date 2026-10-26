@@ -34,7 +34,15 @@ fi
 
 for file in monitors/*.json; do
   name=$(jq -r .name "$file")
-  id=$(dd --get "$api/monitor" --data-urlencode "name=$name" | jq -r --arg n "$name" '[.[] | select(.name == $n) | .id][0] // empty')
+  existing=$(dd --get "$api/monitor" --data-urlencode "name=$name" | jq -c --arg n "$name" '[.[] | select(.name == $n)][0] // empty')
+  id=$(jq -r '.id // empty' <<<"$existing")
+  # Datadog can't change a monitor's type in place, so a monitor this script created is replaced.
+  if [ -n "$id" ] && [ "$(jq -r .type <<<"$existing")" != "$(jq -r .type "$file")" ]; then
+    jq -e '.tags | index("managed-by:apply.sh")' <<<"$existing" >/dev/null \
+      || { echo "the type of '$name' changed; delete monitor $id first" >&2; exit 1; }
+    dd -X DELETE "$api/monitor/$id" >/dev/null && echo "deleted monitor (type changed): $name ($id)"
+    id=""
+  fi
   if [ -n "$id" ]; then
     monitor_body "$file" | dd -X PUT "$api/monitor/$id" -d @- >/dev/null && echo "updated monitor: $name ($id)"
   else

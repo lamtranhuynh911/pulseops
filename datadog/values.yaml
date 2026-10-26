@@ -1,5 +1,5 @@
 # Helm values for the Datadog Agent on the Kind cluster (chart datadog/datadog, version 3.261.0).
-# Install: see "Bring the stack up" in the README. The site comes from .env:
+# Install: see step 4 of "Deployment on Kind" in the README. The site comes from .env:
 #   helm install datadog-agent datadog/datadog -n datadog --version 3.261.0 \
 #     -f datadog/values.yaml --set datadog.site="$DD_SITE"
 #

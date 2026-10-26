@@ -19,13 +19,13 @@
                     {
                       "data_source": "metrics",
                       "name": "up",
-                      "query": "max:pulseops.machine_up{*} by {machine}",
+                      "query": "max:pulseops.machine_up{*} by {machine}.fill(null)",
                       "aggregator": "last"
                     },
                     {
                       "data_source": "metrics",
                       "name": "silence",
-                      "query": "max:pulseops.machine_silence_seconds{*} by {machine}",
+                      "query": "max:pulseops.machine_silence_seconds{*} by {machine}.fill(null)",
                       "aggregator": "last"
                     }
                   ],
@@ -67,7 +67,7 @@
                     {
                       "data_source": "metrics",
                       "name": "s",
-                      "query": "max:pulseops.machine_silence_seconds{*} by {machine}"
+                      "query": "max:pulseops.machine_silence_seconds{*} by {machine}.fill(null)"
                     }
                   ],
                   "formulas": [
@@ -191,7 +191,7 @@
                     {
                       "data_source": "metrics",
                       "name": "t",
-                      "query": "avg:pulseops.machine_measurement{name:temperature_c} by {machine}"
+                      "query": "avg:pulseops.machine_measurement{name:temperature_c} by {machine}.fill(null)"
                     }
                   ],
                   "formulas": [
@@ -216,7 +216,7 @@
                     {
                       "data_source": "metrics",
                       "name": "c",
-                      "query": "avg:pulseops.machine_measurement{name:cycle_time_s} by {machine}"
+                      "query": "avg:pulseops.machine_measurement{name:cycle_time_s} by {machine}.fill(null)"
                     }
                   ],
                   "formulas": [
@@ -241,17 +241,17 @@
                     {
                       "data_source": "metrics",
                       "name": "length",
-                      "query": "avg:pulseops.machine_measurement{machine:machine-1,name:length_mm}"
+                      "query": "avg:pulseops.machine_measurement{machine:machine-1,name:length_mm}.fill(null)"
                     },
                     {
                       "data_source": "metrics",
                       "name": "leak",
-                      "query": "avg:pulseops.machine_measurement{machine:machine-2,name:leak_rate_ml_min}"
+                      "query": "avg:pulseops.machine_measurement{machine:machine-2,name:leak_rate_ml_min}.fill(null)"
                     },
                     {
                       "data_source": "metrics",
                       "name": "voltage",
-                      "query": "avg:pulseops.machine_measurement{machine:machine-3,name:output_voltage_v}"
+                      "query": "avg:pulseops.machine_measurement{machine:machine-3,name:output_voltage_v}.fill(null)"
                     }
                   ],
                   "formulas": [
@@ -306,7 +306,7 @@
                     {
                       "data_source": "metrics",
                       "name": "p",
-                      "query": "max:pulseops.consumer_paused{*} by {pod_name}"
+                      "query": "max:pulseops.consumer_paused{*} by {pod_name}.fill(null)"
                     }
                   ],
                   "formulas": [
