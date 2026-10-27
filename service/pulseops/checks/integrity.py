@@ -62,6 +62,7 @@ class IntegrityCheck:
         cutoff = now - timedelta(seconds=self.timeout_s)
         for state in states:
             if await self.store.set_machine_status(state.machine_id, state.status, now, cutoff):
+                self.on_change(state)
                 if state.status == DOWN:
                     log.warning("%s is DOWN: no data for %.0f s", state.machine_id, state.silence_s)
                 else:

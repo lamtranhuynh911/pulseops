@@ -283,6 +283,9 @@ class Consumer:
         touch = self.storage.touch_machine(message.machine_id, now)  # any message is a sign of life
         if isinstance(message, Heartbeat):
             await touch
+            # Heartbeats have no event ID, so a heartbeat redelivered after a rebalance counts twice;
+            # rare, and harmless for a rate that only shows whether a machine is still talking.
+            metrics.HEARTBEATS.labels(message.machine_id).inc()
             _observe_latency(message)
             return
         # Independent writes run concurrently, to save round trips; gather_all lets all of them finish
@@ -300,6 +303,8 @@ class Consumer:
             metrics.TESTS.labels(message.machine_id, message.result).inc()
             for name, value in message.measurements.items():
                 metrics.MACHINE_MEASUREMENT.labels(message.machine_id, name).set(value)
+                if (spec_zone := specs.zone(message.machine_id, name, value)) is not None:
+                    metrics.MEASUREMENT_ZONE.labels(message.machine_id, name, spec_zone).inc()
         return first_time
 
     async def _reject(self, record, rejected: Rejected, now: datetime) -> None:

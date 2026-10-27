@@ -6,6 +6,8 @@ pauses and retries the message once MongoDB answers again.
 """
 
 import asyncio
+import functools
+import time
 from dataclasses import asdict, fields
 from datetime import datetime, timedelta
 
@@ -24,6 +26,21 @@ PENDING_LEASE = timedelta(seconds=30)
 _PENDING_FIELDS = {f.name for f in fields(PendingCheck)}
 # At most one verdict per downstream result and hop, whatever its type.
 _VERDICT_KEY = [("event_id", ASCENDING), ("upstream_machine_id", ASCENDING)]
+FINAL_STATUSES = (PASSED, FAILED, NON_CONFORMING)
+
+
+def timed(operation: str):
+    """Record the duration of a MongoDB operation, failed ones included, in pulseops_mongodb_operation_seconds."""
+    def decorator(method):
+        @functools.wraps(method)
+        async def wrapper(*args, **kwargs):
+            start = time.perf_counter()
+            try:
+                return await method(*args, **kwargs)
+            finally:
+                metrics.MONGODB_OPERATION.labels(operation).observe(time.perf_counter() - start)
+        return wrapper
+    return decorator
 
 
 class DuplicateVerdicts(Exception):
@@ -96,6 +113,7 @@ class Storage:
             {"_id": machine_id}, {"$max": {"last_seen_at": now}, "$setOnInsert": {"tracked_since": now}}, upsert=True
         )
 
+    @timed("insert_rejected")
     async def insert_rejected(self, topic: str, partition: int, offset: int, kafka_timestamp: int, reason: str,
                               detail: str, raw: bytes | None, received_at: datetime) -> bool:
         """Store a message that failed validation; False if it was already stored (a redelivery).
@@ -124,6 +142,7 @@ class Storage:
             tracked_since[doc["_id"]] = doc["tracked_since"]
         return last_seen, tracked_since
 
+    @timed("set_machine_status")
     async def set_machine_status(self, machine_id: str, status: str, now: datetime, cutoff: datetime) -> bool:
         """Store the status if it differs and the stored times still support it; True if this call changed it.
 
@@ -145,6 +164,7 @@ class Storage:
         )
         return result.modified_count == 1
 
+    @timed("machine_state")
     async def machine_state(self, machine_id: str) -> tuple[str | None, datetime | None]:
         doc = await self.db.machines.find_one({"_id": machine_id}, {"status": 1, "status_changed_at": 1})
         return (doc.get("status"), doc.get("status_changed_at")) if doc else (None, None)
@@ -184,6 +204,7 @@ class Storage:
         await self.db.pending_qa_checks.update_one({"_id": check.event_id}, {"$setOnInsert": asdict(check)}, upsert=True)
         await self.touch_product(check.product_id)  # after the insert (see refresh_product_status)
 
+    @timed("pending_checks")
     async def pending_checks(self, product_id: str, machine_id: str) -> list[PendingCheck]:
         cursor = self.db.pending_qa_checks.find({"product_id": product_id, "machine_id": machine_id})
         return [_pending(doc) async for doc in cursor]
@@ -196,10 +217,12 @@ class Storage:
         )
         return _pending(doc) if doc else None
 
+    @timed("finish_pending")
     async def finish_pending(self, check: PendingCheck) -> None:
         await self.db.pending_qa_checks.delete_one({"_id": check.event_id})
         await self.touch_product(check.product_id)
 
+    @timed("insert_violation")
     async def insert_violation(self, violation: Violation) -> bool:
         document = asdict(violation)
         document["_id"] = document.pop("id")
@@ -216,6 +239,7 @@ class Storage:
     async def touch_product(self, product_id: str) -> None:
         await self.db.products.update_one({"_id": product_id}, {"$inc": {"rev": 1}}, upsert=True)
 
+    @timed("refresh_product_status")
     async def refresh_product_status(self, product_id: str) -> str:
         while True:
             # Why this is safe with concurrent writers (other replicas' QA timers): each writer
@@ -245,6 +269,10 @@ class Storage:
                 return status
             # Another writer changed the product meanwhile: recompute from the new state.
 
+    @timed("count_pending")
+    async def count_pending(self) -> int:
+        return await self.db.pending_qa_checks.count_documents({})
+
     # --- reads for the HTTP API -----------------------------------------------------------------
 
     async def product(self, product_id: str) -> dict | None:
@@ -263,6 +291,14 @@ class Storage:
 def _pending(doc: dict) -> PendingCheck:
     """A pending check from its document (older documents lack the newer, defaulted fields)."""
     return PendingCheck(**{key: value for key, value in doc.items() if key in _PENDING_FIELDS})
+
+
+def line_seconds(doc: dict | None) -> float | None:
+    """Seconds from a product's first to its last machine result (machine timestamps), or None."""
+    times = [entry["timestamp"] for entry in (doc or {}).get("results", {}).values() if entry.get("timestamp")]
+    if len(times) < 2:
+        return None
+    return max(0.0, (max(times) - min(times)).total_seconds())
 
 
 def _latest(doc: dict | None) -> dict[str, str]:

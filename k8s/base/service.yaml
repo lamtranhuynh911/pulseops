@@ -1,5 +1,5 @@
-# The PulseOps service: 2 replicas in the Kafka consumer group pulseops-service. Kafka splits each
-# topic's 3 partitions between them; a 4th replica would get none and stay idle.
+# The PulseOps service: 2 replicas in the Kafka consumer group pulseops-service. Kafka deals the 6
+# partitions of both topics out between them (3 each); a 7th replica would get none and stay idle.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

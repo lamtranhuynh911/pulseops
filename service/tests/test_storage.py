@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from conftest import LINE, load_scenario, result
+from pulseops import metrics
 from pulseops.checks.quality import NON_CONFORMING, PASSED, QualityCheck
 from pulseops.storage import DuplicateVerdicts, Storage
 
@@ -113,6 +114,32 @@ async def test_older_result_does_not_replace_a_newer_retest(storage):
     older = result("machine-1", "P-1", "FAIL", T0, "00000000-0000-4000-8000-000000000001")
     assert await storage.record_result(newer) == {"machine-1": "PASS"}
     assert await storage.record_result(older) == {"machine-1": "PASS"}
+
+
+@with_storage
+async def test_pending_checks_are_counted(storage):
+    assert await storage.count_pending() == 0
+    check = QualityCheck(storage, LINE, grace_s=60)
+    for product, event in (("P-1", 1), ("P-2", 2)):  # machine-2 results with no machine-1 result yet
+        await check.on_result(result("machine-2", product, "PASS", T0, f"00000000-0000-4000-8000-00000000000{event}"), T0)
+    assert await storage.count_pending() == 2
+    await check.expire_pending(T0 + timedelta(seconds=61))
+    assert await storage.count_pending() == 0
+
+
+@with_storage
+async def test_a_status_change_is_counted_once_and_a_passed_product_records_its_line_time(storage):
+    def status_changes(status):
+        return metrics.PRODUCT_STATUS_CHANGES.labels(status)._value.get()
+
+    passed_before, line_before = status_changes(PASSED), metrics.PRODUCT_LINE_TIME._sum.get()
+    for i, machine in enumerate(LINE):
+        await storage.record_result(result(machine, "P-1", "PASS", T0 + timedelta(seconds=15 * i),
+                                           f"00000000-0000-4000-8000-00000000001{i}"))
+    assert await storage.refresh_product_status("P-1") == PASSED
+    assert await storage.refresh_product_status("P-1") == PASSED   # nothing changed: not counted again
+    assert status_changes(PASSED) - passed_before == 1
+    assert metrics.PRODUCT_LINE_TIME._sum.get() - line_before == 30   # machine-1 to machine-3
 
 
 @with_storage

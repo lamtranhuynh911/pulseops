@@ -13,7 +13,7 @@ from pulseops import metrics
 from pulseops.concurrency import gather_all
 from pulseops.config import Settings
 from pulseops.consumer import Consumer, ServiceState, _Rebalance
-from pulseops.models import TestResult
+from pulseops.models import Heartbeat, TestResult
 from pulseops.storage import DuplicateVerdicts
 
 Record = namedtuple("Record", "topic partition offset value timestamp")
@@ -458,6 +458,73 @@ def test_a_test_result_is_counted_once_even_if_a_later_step_fails():
         return counter._value.get() - before
 
     assert asyncio.run(scenario()) == 1
+
+
+def test_heartbeats_are_counted_after_the_write_succeeds():
+    heartbeat = Heartbeat(schema_version=1, machine_id="machine-2", timestamp=datetime(2026, 10, 15, tzinfo=timezone.utc))
+
+    class Storage:
+        def __init__(self):
+            self.fail = True
+
+        async def touch_machine(self, machine_id, now):
+            if self.fail:
+                self.fail = False
+                raise ServerSelectionTimeoutError("MongoDB lost")
+
+    async def scenario():
+        consumer = await make_consumer(Storage())
+        counter = metrics.HEARTBEATS.labels("machine-2")
+        before = counter._value.get()
+        with pytest.raises(ServerSelectionTimeoutError):
+            await consumer._apply(heartbeat, consumer_module.utcnow())
+        assert counter._value.get() == before                       # a failed write counts nothing
+        await consumer._apply(heartbeat, consumer_module.utcnow())   # the retry after the resume
+        return counter._value.get() - before
+
+    assert asyncio.run(scenario()) == 1
+
+
+def test_measurement_zones_are_counted_once_per_result_and_only_for_measurements_with_a_spec():
+    def message(event_id, length_mm):
+        return TestResult(schema_version=1, event_id=event_id, machine_id="machine-1", product_id="P-1", result="PASS",
+                          timestamp=datetime(2026, 10, 15, tzinfo=timezone.utc),
+                          measurements={"length_mm": length_mm, "temperature_c": 34.0})
+
+    class Storage:
+        def __init__(self):
+            self.stored = set()
+
+        async def touch_machine(self, machine_id, now):
+            pass
+
+        async def insert_test_result(self, result, now):
+            first = result.event_id not in self.stored
+            self.stored.add(result.event_id)
+            return first
+
+    class Quality:
+        async def on_result(self, result, now):
+            pass
+
+    def zone_count(zone):
+        return metrics.MEASUREMENT_ZONE.labels("machine-1", "length_mm", zone)._value.get()
+
+    async def scenario():
+        consumer = await make_consumer(Storage())
+        consumer.quality = Quality()
+        before = {zone: zone_count(zone) for zone in ("ok", "marginal", "out")}
+        ok = message("00000000-0000-4000-8000-000000000001", 120.0)
+        for m in (ok, ok,                                                   # the second is a redelivery
+                  message("00000000-0000-4000-8000-000000000002", 120.13),
+                  message("00000000-0000-4000-8000-000000000003", 120.2)):
+            await consumer._apply(m, consumer_module.utcnow())
+        return {zone: zone_count(zone) - before[zone] for zone in before}
+
+    assert asyncio.run(scenario()) == {"ok": 1, "marginal": 1, "out": 1}
+    # temperature_c has no spec, so it never gets a zone series.
+    assert not any(sample.labels.get("name") == "temperature_c"
+                   for family in metrics.MEASUREMENT_ZONE.collect() for sample in family.samples)
 
 
 def test_gather_all_lets_every_write_finish_before_raising():
