@@ -110,7 +110,7 @@ Products move through the machines in the order set by `LINE_SEQUENCE` (`machine
 
 ## Running several replicas
 
-The service Deployment runs 2 replicas by default, and can be scaled up to the number of partitions per topic (3). Kafka gives each partition to exactly one replica of the consumer group; a replica beyond the partition count gets none and stays idle until another replica leaves.
+The service Deployment runs 2 replicas by default, and can be scaled up to 6, the number of partitions of both topics together (2 topics with 3 partitions each). Kafka gives each partition to exactly one replica of the consumer group, dealing the partitions of both topics out round-robin: with 2 replicas each gets 3, with 6 each gets 1. A replica beyond the partition count gets none and stays idle until another replica leaves. The 3 machines' heartbeats do not fill all 3 partitions of `machine.heartbeats` (the key is `machine_id`), so at 6 replicas one of them owns an empty partition and does nothing.
 
 Because a replica only sees part of the data, any state that a check needs across messages is kept in MongoDB:
 
@@ -121,7 +121,7 @@ Because a replica only sees part of the data, any state that a check needs acros
 | Pending QA checks | `pending_qa_checks` | Every replica runs a timer that leases expired pending checks for 30 seconds and deletes a check only after its verdict is stored, so a replica that dies halfway loses nothing: the lease runs out and another replica judges the check. A downstream result gets at most one verdict per hop (a unique index), so judging a check twice records one violation. |
 | A product's latest result per machine | `products` | All of a product's results are on one partition (the key is `product_id`), so one replica handles them in order. |
 
-Each replica exports its own metrics, and Datadog keeps a series per pod. Counters (`tests`, `qa_violations`, `messages_rejected`) count each message once in total, so dashboards sum them across pods. `machine_up` and `machine_silence_seconds` are computed from the shared state, so every replica reports the same value; dashboards take the `max` by machine. `machine_measurement` comes from whichever replica processed a machine's latest result, so dashboards take the `avg` by machine.
+Each replica exports its own metrics, and Datadog keeps a series per pod. Counters (`tests`, `qa_violations`, `messages_rejected`, `product_status_changes`, `measurement_zone`, `machine_status_changes`) count each message or change once in total, so dashboards sum them across pods. `heartbeats` is the exception: heartbeats have no event ID, so one redelivered after a rebalance counts twice, which doesn't matter for a rate that only shows whether a machine is still talking. `machine_up`, `machine_silence_seconds` and `pending_qa_checks` are computed from the shared state, so every replica reports the same value; dashboards take the `max` (by machine, where there is one). `machine_measurement` comes from whichever replica processed a machine's latest result, so dashboards take the `avg` by machine.
 
 When a pod is replaced, its series stop, but Datadog by default keeps filling in a gauge's last value for up to 5 minutes. A deleted pod's `machine_up` of `1` would then hide a machine that goes `DOWN` right afterwards, so the dashboard and the monitors query these gauges with `.fill(null)`. The monitors grouped by pod (*Service unhealthy*, *Consumption paused*) resolve a pod's group once the pod stops reporting. *Service unhealthy* fires only after `/health` has failed for a full minute, longer than a pod takes to shut down, so neither a rolling update nor a deleted pod sets it off.
 
@@ -215,6 +215,13 @@ Interactive API docs are served at `/docs`.
 | `pulseops.messages_rejected.count` | count | `topic`, `reason` | Messages that failed validation |
 | `pulseops.consumer_paused` | gauge | none | `1` while the replica has paused consumption because MongoDB is unavailable |
 | `pulseops.event_latency_seconds.*` | histogram | none | Time from the machine's timestamp until the service has processed the message |
+| `pulseops.product_status_changes.count` | count | `status` | Products that reached `PASSED`, `FAILED` or `NON_CONFORMING`; a product counts again if its status changes later (for example `PASSED` to `NON_CONFORMING` when the QA grace period runs out). The basis for line yield |
+| `pulseops.product_line_seconds.*` | histogram | none | For a `PASSED` product, the time from its first to its last machine result |
+| `pulseops.measurement_zone.count` | count | `machine`, `name`, `zone` | Measurements that have a spec limit, by zone: `ok`, `marginal` (inside the spec but within 20 % of a limit, so a drift shows before results start to `FAIL`) or `out`. Measurements without a spec, such as `temperature_c`, have no zone. The limits are in `service/pulseops/specs.py` |
+| `pulseops.heartbeats.count` | count | `machine` | Heartbeats received; 12 per minute per machine is expected |
+| `pulseops.machine_status_changes.count` | count | `machine`, `status` | Changes to `UP` or `DOWN`; many in a short time means a flapping machine |
+| `pulseops.pending_qa_checks` | gauge | none | QA checks waiting for an upstream result |
+| `pulseops.mongodb_operation_seconds.*` | histogram | `operation` | Duration of each of the service's MongoDB operations, failed ones included |
 
 On `/metrics` the names follow Prometheus conventions: a `pulseops_` prefix, and `_total` on counters. For example, `pulseops_tests_total` arrives in Datadog as `pulseops.tests.count`. The Agent adds a `pod_name` tag (`datadog.checksCardinality: orchestrator` in `datadog/values.yaml`; at the Agent's default, `low`, the replicas' series would collide), so each replica is its own series (see [Running several replicas](#running-several-replicas)).
 
